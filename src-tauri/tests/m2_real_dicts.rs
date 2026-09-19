@@ -7,10 +7,10 @@
 
 use std::time::Instant;
 
-use mdict_visualizer_lib::category::Category;
-use mdict_visualizer_lib::registry::{self, ListFilter};
-use mdict_visualizer_lib::resolver::{resolve, ResolveOutcome};
-use mdict_visualizer_lib::state::{AppState, ResourceId, SourcePool};
+use mdict_editor_lib::category::Category;
+use mdict_editor_lib::registry::{self, ListFilter};
+use mdict_editor_lib::resolver::{resolve, ResolveOutcome};
+use mdict_editor_lib::state::{AppState, ResourceId, SourcePool};
 
 const AHD_DIR: &str = r"C:\Dictionaries\AHD美语传统双解词典（紧凑优雅版）";
 const WORDNET: &str = r"C:\Dictionaries\WordNet\WordNet 3.1 1.50.mdx";
@@ -54,7 +54,7 @@ fn open_state(paths: &[&str]) -> AppState {
 
 /// Locate a word in source 0 and return its HTML body.
 fn locate_html(pool: &SourcePool, word: &str) -> Option<String> {
-    let mdict_visualizer_lib::state::Source::Mdx(file) = &pool.sources.first()?.source else {
+    let mdict_editor_lib::state::Source::Mdx(file) = &pool.sources.first()?.source else {
         return None;
     };
     let entry = file.lookup(word).ok()??;
@@ -110,7 +110,7 @@ fn real_ahd_full_combo() {
 
     // Sample real MDD key shapes (leading slash or not?) and look for keys
     // related to missed references.
-    if let mdict_visualizer_lib::state::Source::Mdd(mdd) = &pool.sources[1].source {
+    if let mdict_editor_lib::state::Source::Mdd(mdd) = &pool.sources[1].source {
         let mut sampled = 0;
         let mut apple_keys = Vec::new();
         for key in mdd.keys().flatten() {
@@ -129,7 +129,7 @@ fn real_ahd_full_combo() {
     // mdres serves a real MDD resource.
     drop(pool);
     drop(registry);
-    let resp = mdict_visualizer_lib::handle_mdres_request(&state, "/preview/mdd-1-0/");
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdd-1-0/");
     assert!(resp.status() == 200 || resp.status() == 404);
     println!("mdd ordinal 0 status {}", resp.status());
 }

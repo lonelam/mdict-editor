@@ -1,10 +1,10 @@
 //! M2 integration tests: reference resolution and the mdres:// preview
 //! request handler (called directly, no webview required).
 
-use mdict_visualizer_lib::fixtures;
-use mdict_visualizer_lib::registry::{self, Registry};
-use mdict_visualizer_lib::resolver::{resolve, resolve_path, ResolveOutcome};
-use mdict_visualizer_lib::state::{AppState, ResourceId, SourcePool};
+use mdict_editor_lib::fixtures;
+use mdict_editor_lib::registry::{self, Registry};
+use mdict_editor_lib::resolver::{resolve, resolve_path, ResolveOutcome};
+use mdict_editor_lib::state::{AppState, ResourceId, SourcePool};
 use std::sync::Mutex;
 
 struct Env {
@@ -54,7 +54,7 @@ fn found_of(out: ResolveOutcome) -> (ResourceId, &'static str) {
 
 #[test]
 fn normalize_paths() {
-    use mdict_visualizer_lib::resolver::{dir_of, normalize_path};
+    use mdict_editor_lib::resolver::{dir_of, normalize_path};
     assert_eq!(normalize_path("a/b/../c.png"), "/a/c.png");
     assert_eq!(normalize_path("\\img\\logo.png"), "/img/logo.png");
     assert_eq!(normalize_path("img//x/../y.png"), "/img/y.png");
@@ -186,38 +186,38 @@ fn case_insensitive_keys() {
 fn mdres_handler_serves_resolved_bytes() {
     let env = setup();
     // Preview the "world" entry itself.
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/");
     assert_eq!(resp.status(), 200);
     assert!(resp.headers()["Content-Type"].to_str().unwrap().starts_with("text/html"));
     let body = String::from_utf8_lossy(resp.body());
     assert!(body.contains("css/style.css"));
 
     // Relative request inside that context resolves to real css bytes.
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/css/style.css");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/css/style.css");
     assert_eq!(resp.status(), 200);
     let body = String::from_utf8_lossy(resp.body());
     assert!(body.contains("@import"));
 
     // Image via suffix-less root path, percent-encoded dir with space.
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/img/heart.png");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/img/heart.png");
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.headers()["Content-Type"], "image/png");
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/docs/my%20file.txt");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/docs/my%20file.txt");
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body(), b"spaces in the middle");
 
     // Misses → 404.
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/nope.png");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/nope.png");
     assert_eq!(resp.status(), 404);
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/bogus");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/bogus");
     assert_eq!(resp.status(), 404);
 
     // Preview an MDD css resource directly (context = the css itself).
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/");
     assert_eq!(resp.status(), 200);
     assert!(String::from_utf8_lossy(resp.body()).contains(".logo"));
     // Its @import resolves relative to /css/.
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/extra.css");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/extra.css");
     assert_eq!(resp.status(), 200);
 }
 
@@ -231,7 +231,7 @@ fn mdres_uses_overlay_bytes() {
         .lock()
         .unwrap()
         .write(env.mdd_style.clone(), vec![], edited);
-    let resp = mdict_visualizer_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/");
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/");
     assert!(String::from_utf8_lossy(resp.body()).contains("/* edited */"));
 }
 

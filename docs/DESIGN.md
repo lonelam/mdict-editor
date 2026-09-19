@@ -1,4 +1,4 @@
-# mdict-visualizer 设计方案 v1
+# mdict-editor 设计方案 v1
 
 > 状态：待评审 · 基于已跑通的骨架（Tauri 2 + SvelteKit/Svelte 5 + mdictlib path 链接）
 

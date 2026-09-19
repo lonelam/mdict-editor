@@ -1,10 +1,10 @@
 //! M3 integration tests: processors and pipeline dry-run/apply semantics.
 
-use mdict_visualizer_lib::fixtures;
-use mdict_visualizer_lib::pipeline::{self, Scope};
-use mdict_visualizer_lib::processors::Processor;
-use mdict_visualizer_lib::registry::{self, Registry};
-use mdict_visualizer_lib::state::{AppState, ResourceId, SourcePool};
+use mdict_editor_lib::fixtures;
+use mdict_editor_lib::pipeline::{self, Scope};
+use mdict_editor_lib::processors::Processor;
+use mdict_editor_lib::registry::{self, Registry};
+use mdict_editor_lib::state::{AppState, ResourceId, SourcePool};
 
 fn setup() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();

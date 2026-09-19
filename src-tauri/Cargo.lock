@@ -2595,7 +2595,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
 
 [[package]]
-name = "mdict-visualizer"
+name = "mdict-editor"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "mdictlib"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "encoding_rs",
  "lzokay",

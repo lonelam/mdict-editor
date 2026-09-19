@@ -1,4 +1,4 @@
-# mdict-visualizer
+# mdict-editor
 
 基于 Tauri 2 + SvelteKit(Svelte 5) 的 MDict 词典可视化编辑工具，通过本地 path 依赖链接
 [`mdictlib`](../mdictlib)（`src-tauri/Cargo.toml` 中 `../../mdictlib`，启用 `lzo` feature）。

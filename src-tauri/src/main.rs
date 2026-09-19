@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    mdict_visualizer_lib::run()
+    mdict_editor_lib::run()
 }

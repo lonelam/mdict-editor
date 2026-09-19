@@ -46,14 +46,14 @@
 </script>
 
 <svelte:head>
-  <title>MDict Visualizer</title>
+  <title>MDict Editor</title>
 </svelte:head>
 
 <svelte:window onkeydown={onKeydown} />
 
 <div class="shell">
   <header class="toolbar">
-    <span class="logo">MDict Visualizer</span>
+    <span class="logo">MDict Editor</span>
     <button onclick={() => store.openFiles()}>打开 / 追加文件</button>
     <span class="sep"></span>
     <button

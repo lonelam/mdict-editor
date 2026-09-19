@@ -1,10 +1,10 @@
 //! M4 integration tests: export build with self-checks.
 
-use mdict_visualizer_lib::export::{export_build, ExportConfig};
-use mdict_visualizer_lib::fixtures;
-use mdict_visualizer_lib::processors::Processor;
-use mdict_visualizer_lib::registry::{self, Registry};
-use mdict_visualizer_lib::state::{AppState, Overlay, ResourceId, SourcePool};
+use mdict_editor_lib::export::{export_build, ExportConfig};
+use mdict_editor_lib::fixtures;
+use mdict_editor_lib::processors::Processor;
+use mdict_editor_lib::registry::{self, Registry};
+use mdict_editor_lib::state::{AppState, Overlay, ResourceId, SourcePool};
 
 fn setup() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();

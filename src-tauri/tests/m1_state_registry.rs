@@ -3,10 +3,10 @@
 
 use std::path::Path;
 
-use mdict_visualizer_lib::category::Category;
-use mdict_visualizer_lib::fixtures;
-use mdict_visualizer_lib::registry::{self, ListFilter, Registry};
-use mdict_visualizer_lib::state::{Overlay, ResourceId, SourcePool};
+use mdict_editor_lib::category::Category;
+use mdict_editor_lib::fixtures;
+use mdict_editor_lib::registry::{self, ListFilter, Registry};
+use mdict_editor_lib::state::{Overlay, ResourceId, SourcePool};
 
 struct Env {
     _dir: tempfile::TempDir,
