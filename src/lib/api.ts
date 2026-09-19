@@ -1,14 +1,74 @@
 // Typed invoke wrappers around the Tauri commands.
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   Category, ExportConfig, ExportReport, Processor, ResolveOutcome,
   ResourceContent, ResourceId, ResourceMeta, RevisionInfo, Scope, SourceInfo,
   CategoryStat, StepReport,
 } from "./types";
 
-export async function openSources(paths: string[]): Promise<SourceInfo[]> {
+export interface OpenResult {
+  added: SourceInfo[];
+  skipped: string[];
+  errors: string[];
+}
+
+export async function openSources(paths: string[]): Promise<OpenResult> {
   return invoke("open_sources", { paths });
 }
+
+export async function removeSource(id: number): Promise<boolean> {
+  return invoke("remove_source", { id });
+}
+
+// ---- long-running jobs (progress + cancel via events) ----
+
+interface JobProgress {
+  job: string;
+  done: number;
+  total: number;
+  item: string;
+}
+interface JobDone<T> {
+  job: string;
+  ok: boolean;
+  value?: T;
+  error?: string;
+}
+
+/**
+ * Starts a background job and awaits its completion, surfacing per-item
+ * progress. `start` invokes a `*_start` command that returns the job id;
+ * progress and completion arrive as `job-progress` / `job-done` events.
+ */
+export async function runJob<T>(
+  start: Promise<string>,
+  onProgress?: (done: number, total: number, item: string) => void
+): Promise<T> {
+  const job = await start;
+  return new Promise<T>((resolve, reject) => {
+    const unP = listen<JobProgress>("job-progress", (e) => {
+      if (e.payload.job === job) {
+        onProgress?.(e.payload.done, e.payload.total, e.payload.item);
+      }
+    });
+    const unD = listen<JobDone<T>>("job-done", (e) => {
+      if (e.payload.job !== job) return;
+      unP.then((u) => u());
+      unD.then((u) => u());
+      if (e.payload.ok) resolve(e.payload.value as T);
+      else reject(new Error(e.payload.error ?? "job failed"));
+    });
+  });
+}
+
+export const pipelineDryRunStart = (steps: Processor[], scope: Scope) =>
+  invoke<string>("pipeline_dry_run_start", { steps, scope });
+export const pipelineApplyStart = (steps: Processor[], scope: Scope) =>
+  invoke<string>("pipeline_apply_start", { steps, scope });
+export const exportStart = (config: ExportConfig) =>
+  invoke<string>("export_start", { config });
+export const cancelJob = (job: string) => invoke<boolean>("cancel_job", { job });
 
 export async function resourceStats(source: number | null): Promise<CategoryStat[]> {
   return invoke("resource_stats", { source });
@@ -61,23 +121,6 @@ export async function resolveReference(
   return invoke("resolve_reference", { reference, context });
 }
 
-export async function pipelineDryRun(
-  steps: Processor[],
-  scope: Scope
-): Promise<StepReport[]> {
-  return invoke("pipeline_dry_run", { steps, scope });
-}
-
-export async function pipelineApply(
-  steps: Processor[],
-  scope: Scope
-): Promise<StepReport[]> {
-  return invoke("pipeline_apply", { steps, scope });
-}
-
-export async function exportBuild(config: ExportConfig): Promise<ExportReport> {
-  return invoke("export_build", { config });
-}
 
 /**
  * URL for the mdres:// preview protocol. WebView2 (Windows) serves custom

@@ -2,6 +2,7 @@
 
 use mdict_editor_lib::export::{export_build, ExportConfig};
 use mdict_editor_lib::fixtures;
+use mdict_editor_lib::pipeline::NO_CTL;
 use mdict_editor_lib::processors::Processor;
 use mdict_editor_lib::registry::{self, Registry};
 use mdict_editor_lib::state::{AppState, Overlay, ResourceId, SourcePool};
@@ -42,7 +43,7 @@ fn export_edited_mdx_and_reopen() {
             mdx: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 1, "{:?}", report.files);
     let file = &report.files[0];
@@ -90,7 +91,7 @@ fn export_edited_mdd_with_externals_embedded() {
             embed_externals: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 1, "{:?}", report.files);
     let file = &report.files[0];
@@ -122,7 +123,7 @@ fn export_embed_rebuilds_even_without_edits() {
             embed_externals: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 1, "{:?}", report.files);
     assert!(report.files[0].check_ok, "{}", report.files[0].message);
@@ -155,7 +156,7 @@ fn export_externals_only_makes_standalone_mdd() {
             embed_externals: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 1);
     assert!(report.files[0].path.ends_with("externals.mdd"));
@@ -178,7 +179,7 @@ fn export_save_externals_writes_files() {
             save_externals: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 2);
     let css = report.files.iter().find(|f| f.path.ends_with("style-ext.css")).unwrap();
@@ -197,7 +198,7 @@ fn export_without_edits_reports_skip() {
             mdx: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(report.files.len(), 1);
     assert!(!report.files[0].check_ok, "skipped export is not ok");
@@ -222,7 +223,7 @@ fn export_lossy_dual_output_and_overlay_untouched() {
             }]),
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
 
     // Only the lossy copy is produced (no edits → no .edited.mdd).
@@ -289,7 +290,7 @@ fn export_lossy_preserves_transparent_images() {
             }]),
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     let lossy = report
         .files
@@ -333,7 +334,7 @@ fn export_edited_and_lossy_coexist() {
             }]),
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
 
     let edited = report.files.iter().find(|f| f.path.ends_with("assets.edited.mdd")).unwrap();

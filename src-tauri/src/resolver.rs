@@ -87,7 +87,7 @@ fn exact_hits(
 ) -> Vec<ResourceId> {
     let mut hits = Vec::new();
     for (idx, entry) in pool.sources.iter().enumerate() {
-        if !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
+        if entry.tombstone || !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
             continue;
         }
         let Some(Some(index)) = registry.indices.get(idx) else {
@@ -125,7 +125,7 @@ fn suffix_hits(
 ) -> (Vec<ResourceId>, Vec<String>) {
     let mut ids = Vec::new();
     for (idx, entry) in pool.sources.iter().enumerate() {
-        if !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
+        if entry.tombstone || !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
             continue;
         }
         let Some(Some(index)) = registry.indices.get(idx) else {
@@ -158,6 +158,9 @@ fn find_entry(pool: &SourcePool, word: &str) -> Option<ResourceId> {
         let Source::Mdx(file) = &entry.source else {
             continue;
         };
+        if entry.tombstone {
+            continue;
+        }
         let matches = file.locate(word).ok()??;
         let first = matches.iter().next();
         if let Some(ordinal) = first {

@@ -64,6 +64,9 @@ pub fn build_source_index(pool: &SourcePool, source_idx: usize) -> Result<Source
         .get(source_idx)
         .ok_or_else(|| format!("source index {source_idx} not loaded"))?;
     let mut rows = Vec::new();
+    if entry.tombstone {
+        return Ok(SourceIndex { rows });
+    }
     match &entry.source {
         Source::Mdx(file) => {
             for key in file.keys() {
@@ -151,6 +154,9 @@ pub fn list_resources(
             .sources
             .get(source_idx)
             .ok_or_else(|| format!("source index {source_idx} not loaded"))?;
+        if entry.tombstone {
+            continue;
+        }
         let Some(Some(index)) = registry.indices.get(source_idx) else {
             continue;
         };
@@ -224,6 +230,9 @@ pub fn stats(
             .sources
             .get(source_idx)
             .ok_or_else(|| format!("source index {source_idx} not loaded"))?;
+        if entry.tombstone {
+            continue;
+        }
         let Some(Some(index)) = registry.indices.get(source_idx) else {
             continue;
         };

@@ -1,7 +1,7 @@
 //! M3 integration tests: processors and pipeline dry-run/apply semantics.
 
 use mdict_editor_lib::fixtures;
-use mdict_editor_lib::pipeline::{self, Scope};
+use mdict_editor_lib::pipeline::{self, NO_CTL, Scope};
 use mdict_editor_lib::processors::Processor;
 use mdict_editor_lib::registry::{self, Registry};
 use mdict_editor_lib::state::{AppState, ResourceId, SourcePool};
@@ -127,7 +127,7 @@ fn pipeline_dry_run_reports_without_writing() {
             all: true,
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
 
     let ok_rows: Vec<_> = reports.iter().filter(|r| r.status == "ok").collect();
@@ -156,7 +156,7 @@ fn pipeline_apply_writes_overlay_and_reverts() {
             &mut registry,
             &[Processor::MinifyCss, Processor::MinifyJs],
             &scope_all,
-        )
+        &NO_CTL)
         .unwrap();
         let applied: Vec<_> = reports.iter().filter(|r| r.status == "ok").collect();
         assert_eq!(applied.len(), 5);
@@ -204,7 +204,7 @@ fn pipeline_per_item_errors_do_not_break_batch() {
             ]),
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(reports.len(), 3);
     assert!(reports[0].status == "ok" || reports[0].status == "skip");
@@ -227,7 +227,7 @@ fn pipeline_empty_processor_set_skips_everything() {
             ids: Some(vec![ResourceId::Mdd { source: 1, ordinal: 8 }]),
             ..Default::default()
         },
-    )
+    &NO_CTL)
     .unwrap();
     assert_eq!(reports[0].status, "skip");
 }

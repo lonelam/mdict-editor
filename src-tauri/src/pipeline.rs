@@ -79,15 +79,34 @@ fn select_targets(
     )
 }
 
+/// Progress + cancellation handles threaded through long-running jobs.
+/// `progress(done, total, current_item)` fires per resource; `cancelled` is
+/// polled between items so the user can stop a multi-minute batch.
+pub struct JobCtl<'a> {
+    pub progress: &'a (dyn Fn(u64, u64, &str) + Sync),
+    pub cancelled: &'a (dyn Fn() -> bool + Sync),
+}
+
+pub const NO_CTL: JobCtl<'static> = JobCtl {
+    progress: &|_, _, _| {},
+    cancelled: &|| false,
+};
+
 fn run_steps(
     pool: &SourcePool,
     overlay: &Overlay,
     steps: &[Processor],
     metas: Vec<crate::registry::ResourceMeta>,
+    ctl: &JobCtl,
     mut write: impl FnMut(ResourceId, Vec<u8>),
-) -> Vec<StepReport> {
+) -> Result<Vec<StepReport>, String> {
+    let total = metas.len() as u64;
     let mut reports = Vec::new();
-    for meta in metas {
+    for (i, meta) in metas.into_iter().enumerate() {
+        if (ctl.cancelled)() {
+            return Err("已取消".into());
+        }
+        (ctl.progress)(i as u64, total, &meta.key);
         if meta.deleted {
             continue;
         }
@@ -172,7 +191,7 @@ fn run_steps(
             }),
         }
     }
-    reports
+    Ok(reports)
 }
 
 pub fn dry_run(
@@ -181,9 +200,10 @@ pub fn dry_run(
     registry: &Registry,
     steps: &[Processor],
     scope: &Scope,
+    ctl: &JobCtl,
 ) -> Result<Vec<StepReport>, String> {
     let metas = select_targets(pool, overlay, registry, scope)?;
-    Ok(run_steps(pool, overlay, steps, metas, |_, _| {}))
+    run_steps(pool, overlay, steps, metas, ctl, |_, _| {})
 }
 
 pub fn apply(
@@ -192,12 +212,13 @@ pub fn apply(
     registry: &Registry,
     steps: &[Processor],
     scope: &Scope,
+    ctl: &JobCtl,
 ) -> Result<Vec<StepReport>, String> {
     let metas = select_targets(pool, overlay, registry, scope)?;
     let mut applied: Vec<(ResourceId, Vec<u8>)> = Vec::new();
-    let reports = run_steps(pool, overlay, steps, metas, |id, bytes| {
+    let reports = run_steps(pool, overlay, steps, metas, ctl, |id, bytes| {
         applied.push((id, bytes));
-    });
+    })?;
     // Deferred writes keep the closure uniform between dry_run and apply.
     for (id, bytes) in applied {
         let original = match overlay.get(&id) {

@@ -73,14 +73,40 @@ class AppStore {
   async addSources(paths: string[]) {
     this.loading = true;
     try {
-      const added = await api.openSources(paths);
-      this.sources = [...this.sources, ...added];
-      this.toast("ok", `已加载 ${added.length} 个文件`);
-      for (const s of added) void this.refreshStats(s.id);
+      const res = await api.openSources(paths);
+      this.sources = [...this.sources, ...res.added];
+      if (res.skipped.length > 0) {
+        this.toast("info", `跳过重复文件: ${res.skipped.join(", ")}`);
+      }
+      for (const e of res.errors) {
+        this.toast("error", e);
+      }
+      if (res.added.length > 0) {
+        this.toast("ok", `已加载 ${res.added.length} 个文件`);
+      }
+      for (const s of res.added) void this.refreshStats(s.id);
     } catch (e) {
       this.toast("error", String(e));
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** Unloads a source (tombstone); closes its tabs, keeps ids stable. */
+  async removeSource(id: number) {
+    try {
+      await api.removeSource(id);
+      this.sources = this.sources.filter((s) => s.id !== id);
+      const closed = this.tabs.filter(
+        (t) =>
+          (t.meta.id.t !== "ext" && t.meta.id.source === id) ||
+          (t.meta.id.t === "ext" && t.meta.id.file === id)
+      );
+      for (const t of closed) this.closeTab(t.key);
+      delete this.stats[id];
+      this.toast("ok", "已移除（源文件未改动，可重新打开）");
+    } catch (e) {
+      this.toast("error", String(e));
     }
   }
 

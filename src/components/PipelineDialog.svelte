@@ -21,6 +21,8 @@
 
   let running = $state(false);
   let reports = $state<StepReport[] | null>(null);
+  let job = $state<string | null>(null);
+  let progress = $state<{ done: number; total: number; item: string } | null>(null);
 
   function buildSteps(): Processor[] {
     const steps: Processor[] = [];
@@ -53,10 +55,16 @@
 
   async function run(dry: boolean) {
     running = true;
+    reports = null;
+    progress = null;
     try {
-      reports = dry
-        ? await api.pipelineDryRun(buildSteps(), buildScope())
-        : await api.pipelineApply(buildSteps(), buildScope());
+      const start = dry
+        ? api.pipelineDryRunStart(buildSteps(), buildScope())
+        : api.pipelineApplyStart(buildSteps(), buildScope());
+      start.then((id) => (job = id));
+      reports = await api.runJob<StepReport[]>(start, (done, total, item) => {
+        progress = { done, total, item };
+      });
       if (!dry) {
         const ok = reports.filter((r) => r.status === "ok");
         const saved = ok.reduce((sum, r) => sum + r.delta, 0);
@@ -64,9 +72,12 @@
         store.bumpOverlay();
       }
     } catch (e) {
-      store.toast("error", String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      store.toast(msg === "已取消" ? "info" : "error", msg);
     } finally {
       running = false;
+      job = null;
+      progress = null;
     }
   }
 
@@ -163,6 +174,13 @@
       {/if}
     </section>
 
+    {#if running && progress}
+      <div class="job-progress">
+        <div class="bar"><div class="fill" style:width={`${progress.total ? (progress.done / progress.total) * 100 : 0}%`}></div></div>
+        <span>{progress.done}/{progress.total} · {progress.item}</span>
+        <button class="cancel" onclick={() => job && api.cancelJob(job)}>取消</button>
+      </div>
+    {/if}
     <footer>
       <button disabled={running || !canRun} onclick={() => run(true)}>
         {running ? "运行中…" : "试运行"}
@@ -287,4 +305,38 @@
     color: #fff;
   }
   footer button:disabled { opacity: 0.5; cursor: default; }
+  .job-progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .job-progress .bar {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-active);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .job-progress .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.15s;
+  }
+  .job-progress span {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .job-progress .cancel {
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--danger);
+    font-size: 12px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
 </style>

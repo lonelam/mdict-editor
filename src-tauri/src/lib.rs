@@ -12,11 +12,71 @@ pub mod resolver;
 pub mod state;
 
 use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
 
+use crate::pipeline::JobCtl;
 use crate::registry::{ListFilter, Registry, ResourceMeta};
 use crate::state::{AppState, Overlay, ResourceId, SourcePool};
 
-#[derive(Serialize, Clone)]
+/// Background job registry: cancellation flags keyed by job id. Workers emit
+/// `job-progress` / `job-done` events; the UI listens instead of holding a
+/// blocking invoke for multi-minute batches.
+#[derive(Default)]
+struct Jobs {
+    counter: std::sync::atomic::AtomicU64,
+    cancels: Mutex<HashMap<String, std::sync::Arc<AtomicBool>>>,
+}
+
+fn start_job<T, F>(app: &AppHandle, name: &str, work: F) -> String
+where
+    T: Serialize + 'static,
+    F: FnOnce(&AppState, &JobCtl) -> Result<T, String> + Send + 'static,
+{
+    let jobs = app.state::<Jobs>();
+    let n = jobs.counter.fetch_add(1, Ordering::Relaxed);
+    let id = format!("{name}-{}", n);
+    let flag = Arc::new(AtomicBool::new(false));
+    jobs.cancels.lock().expect("jobs").insert(id.clone(), flag.clone());
+    let app_progress = app.clone();
+    let id_progress = id.clone();
+    let app_done = app.clone();
+    let id_done = id.clone();
+    let app_cleanup = app.clone();
+    let id_cleanup = id.clone();
+    std::thread::spawn(move || {
+        let state = app_progress.state::<AppState>();
+        let ctl = JobCtl {
+            progress: &|done, total, item| {
+                let _ = app_progress.emit(
+                    "job-progress",
+                    serde_json::json!({"job": id_progress, "done": done, "total": total, "item": item}),
+                );
+            },
+            cancelled: &|| flag.load(Ordering::Relaxed),
+        };
+        let (ok, value, error) = match work(&state, &ctl) {
+            Ok(value) => (true, Some(serde_json::to_value(&value).ok()), None),
+            Err(error) => (false, None, Some(error)),
+        };
+        let _ = app_done.emit(
+            "job-done",
+            serde_json::json!({"job": id_done, "ok": ok, "value": value, "error": error}),
+        );
+        app_cleanup
+            .state::<Jobs>()
+            .cancels
+            .lock()
+            .expect("jobs")
+            .remove(&id_cleanup);
+    });
+    id
+}
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceInfo {
     id: u32,
@@ -73,22 +133,60 @@ fn with_registry<T>(
     f(&pool, &registry)
 }
 
-/// Opens paths (mdx/mdd/js/css mixed) and appends them as sources.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenResult {
+    added: Vec<SourceInfo>,
+    /// Same-file re-opens that were skipped (deduped by canonical path).
+    skipped: Vec<String>,
+    /// Files that failed to open, with reason; the batch is not aborted.
+    errors: Vec<String>,
+}
+
+/// Opens paths (mdx/mdd/js/css mixed) and appends them as active sources.
+/// Same-path re-opens are skipped; per-file errors do not abort the batch.
 #[tauri::command]
-fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Vec<SourceInfo>, String> {
+fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<OpenResult, String> {
     let mut pool = state.pool.lock().map_err(|e| e.to_string())?;
     let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
-    let before = source_infos(&pool).len() as u32;
+    let mut result = OpenResult {
+        added: Vec::new(),
+        skipped: Vec::new(),
+        errors: Vec::new(),
+    };
     for path in paths {
-        let entry = SourcePool::open_path(&path)?;
-        pool.sources.push(entry);
+        match SourcePool::open_path(&path) {
+            Ok(entry) => {
+                if pool.has_active_path(&entry.path) {
+                    result.skipped.push(entry.name);
+                    continue;
+                }
+                let info = SourceInfo {
+                    id: pool.sources.len() as u32,
+                    kind: entry.kind(),
+                    name: entry.name.clone(),
+                    title: entry.title.clone(),
+                    entry_count: entry.entry_count(),
+                };
+                pool.sources.push(entry);
+                registry.indices.push(None);
+                result.added.push(info);
+            }
+            Err(e) => result.errors.push(e),
+        }
     }
-    let infos = source_infos(&pool);
-    // Lazy-index new sources on first browse instead of blocking the open.
-    while registry.indices.len() < pool.sources.len() {
-        registry.indices.push(None);
-    }
-    Ok(infos[before as usize..].to_vec())
+    Ok(result)
+}
+
+/// Removes (tombstones) a source. Ids stay stable; overlay edits that point
+/// into the removed source are dropped.
+#[tauri::command]
+fn remove_source(id: u32, state: tauri::State<AppState>) -> Result<bool, String> {
+    let mut pool = state.pool.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    pool.remove(id as usize)?;
+    overlay.revisions.retain(|k, _| k.source_index() != id);
+    Ok(true)
 }
 
 #[tauri::command]
@@ -378,43 +476,60 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
     }
 }
 
-/// Runs the pipeline without writing: reports per-resource before/after.
+/// Starts a dry-run job; progress/done arrive via events. Returns job id.
 #[tauri::command]
-fn pipeline_dry_run(
+fn pipeline_dry_run_start(
     steps: Vec<processors::Processor>,
     scope: pipeline::Scope,
-    state: tauri::State<AppState>,
-) -> Result<Vec<pipeline::StepReport>, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
-    registry::ensure_built(&pool, &mut registry)?;
-    pipeline::dry_run(&pool, &overlay, &registry, &steps, &scope)
+    app: AppHandle,
+) -> String {
+    start_job(&app, "pipeline-dry", move |st, ctl| {
+        let pool = st.pool.lock().map_err(|e| e.to_string())?;
+        let overlay = st.overlay.lock().map_err(|e| e.to_string())?;
+        let mut registry = st.registry.lock().map_err(|e| e.to_string())?;
+        registry::ensure_built(&pool, &mut registry)?;
+        pipeline::dry_run(&pool, &overlay, &registry, &steps, &scope, ctl)
+    })
 }
 
-/// Applies the pipeline to the scope's resources through the overlay.
+/// Starts a pipeline apply job; writes go through the overlay.
 #[tauri::command]
-fn pipeline_apply(
+fn pipeline_apply_start(
     steps: Vec<processors::Processor>,
     scope: pipeline::Scope,
-    state: tauri::State<AppState>,
-) -> Result<Vec<pipeline::StepReport>, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
-    registry::ensure_built(&pool, &mut registry)?;
-    pipeline::apply(&pool, &mut overlay, &registry, &steps, &scope)
+    app: AppHandle,
+) -> String {
+    start_job(&app, "pipeline-apply", move |st, ctl| {
+        let pool = st.pool.lock().map_err(|e| e.to_string())?;
+        let mut overlay = st.overlay.lock().map_err(|e| e.to_string())?;
+        let mut registry = st.registry.lock().map_err(|e| e.to_string())?;
+        registry::ensure_built(&pool, &mut registry)?;
+        pipeline::apply(&pool, &mut overlay, &registry, &steps, &scope, ctl)
+    })
 }
 
-/// Builds exported mdx/mdd files from the current overlay state.
+/// Starts an export job; outputs land in `config.out_dir`.
 #[tauri::command]
-fn export_build(
-    config: export::ExportConfig,
-    state: tauri::State<AppState>,
-) -> Result<export::ExportReport, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    export::export_build(&pool, &overlay, &config)
+fn export_start(config: export::ExportConfig, app: AppHandle) -> String {
+    start_job(&app, "export", move |st, ctl| {
+        let pool = st.pool.lock().map_err(|e| e.to_string())?;
+        let overlay = st.overlay.lock().map_err(|e| e.to_string())?;
+        export::export_build(&pool, &overlay, &config, ctl)
+    })
+}
+
+/// Flags a running job for cancellation between items.
+#[tauri::command]
+fn cancel_job(job: String, app: AppHandle) -> bool {
+    let jobs = app.state::<Jobs>();
+    let flag = jobs.cancels.lock().expect("jobs").get(&job).cloned();
+    match flag {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -434,9 +549,11 @@ pub fn run() {
             revert_resource,
             delete_resource,
             resolve_reference,
-            pipeline_dry_run,
-            pipeline_apply,
-            export_build
+            remove_source,
+            pipeline_dry_run_start,
+            pipeline_apply_start,
+            export_start,
+            cancel_job
         ])
         .register_uri_scheme_protocol("mdres", |ctx, request| {
             use tauri::Manager;

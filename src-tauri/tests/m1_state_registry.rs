@@ -338,3 +338,36 @@ fn ensure_built_fills_placeholder_slots() {
     let stats = registry::stats(&env.pool, &overlay, &registry, None).unwrap();
     assert!(!stats.is_empty());
 }
+
+/// Same-path re-opens are detected as duplicates; removal tombstones the
+/// source out of every listing while ids stay stable.
+#[test]
+fn dedupe_and_remove_sources() {
+    let mut env = setup();
+    let mdx_path = env._dir.path().join("ocean.mdx");
+    let entry = SourcePool::open_path(mdx_path.to_str().unwrap()).unwrap();
+    assert!(
+        env.pool.has_active_path(&entry.path),
+        "same file detected as already loaded"
+    );
+
+    env.pool.remove(0).unwrap();
+    let overlay = Overlay::default();
+    let rows = registry::list_resources(
+        &env.pool,
+        &overlay,
+        &env.registry,
+        &ListFilter {
+            source: None,
+            category: None,
+            prefix: "",
+            offset: 0,
+            limit: 1000,
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 11, "17 total minus 6 mdx entries");
+    assert!(env.pool.get(&ResourceId::Mdx { source: 0, ordinal: 0 }).is_err());
+    let stats = registry::stats(&env.pool, &overlay, &env.registry, None).unwrap();
+    assert!(!stats.iter().any(|s| s.category == Category::Entry));
+}

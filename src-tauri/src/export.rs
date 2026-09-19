@@ -9,6 +9,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::category::Category;
+use crate::pipeline::JobCtl;
 use crate::processors::Processor;
 use crate::registry::normalize_key;
 use crate::state::{current_bytes, Overlay, ResourceId, Source, SourcePool};
@@ -80,6 +81,7 @@ fn rebuild_mdx_source(
     overlay: &Overlay,
     src_idx: usize,
     out_path: &Path,
+    ctl: &JobCtl,
 ) -> Result<ExportedFile, String> {
     let Source::Mdx(file) = &pool.sources[src_idx].source else {
         return Err("not an mdx source".into());
@@ -98,7 +100,17 @@ fn rebuild_mdx_source(
     let mut edits = mdictlib::EditSet::new();
     let mut deleted = 0u64;
     let mut first_edited: Option<(String, String)> = None;
-    for ((_src, ordinal), rev) in &edits_map {
+    let total = edits_map.len() as u64;
+    for (i, ((_src, ordinal), rev)) in edits_map.iter().enumerate() {
+        if (ctl.cancelled)() {
+            return Err("已取消".into());
+        }
+        let key_name = file
+            .key_at(mdictlib::KeyOrdinal::new(*ordinal))
+            .map_err(|e| e.to_string())?
+            .map(|k| k.key().to_string())
+            .unwrap_or_default();
+        (ctl.progress)(i as u64, total, &key_name);
         let ordinal = mdictlib::KeyOrdinal::new(*ordinal);
         let key = file
             .key_at(ordinal)
@@ -169,6 +181,7 @@ fn rebuild_mdd_source(
     out_path: &Path,
     externals: &[(String, Vec<u8>)],
     lossy: Option<&[Processor]>,
+    ctl: &JobCtl,
 ) -> Result<(ExportedFile, Vec<String>), String> {
     let Source::Mdd(file) = &pool.sources[src_idx].source else {
         return Err("not an mdd source".into());
@@ -191,8 +204,15 @@ fn rebuild_mdd_source(
     let mut rewritten = 0u64;
     let mut lossy_changed = 0u64;
     let mut lossy_total = 0u64;
+    let total = file.len();
+    let mut seen = 0u64;
     for key in file.keys() {
+        if (ctl.cancelled)() {
+            return Err("已取消".into());
+        }
+        seen += 1;
         let key = key.map_err(|e| e.to_string())?;
+        (ctl.progress)(seen, total, key.key());
         let ordinal = key.ordinal().get();
         let name = key.key().to_string();
         let raw: Vec<u8> = match edits_map.get(&(src_idx as u32, ordinal)) {
@@ -342,6 +362,7 @@ pub fn export_build(
     pool: &SourcePool,
     overlay: &Overlay,
     config: &ExportConfig,
+    ctl: &JobCtl,
 ) -> Result<ExportReport, String> {
     if config.out_dir.trim().is_empty() {
         return Err("output directory is required".into());
@@ -353,12 +374,14 @@ pub fn export_build(
 
     if config.mdx {
         for idx in 0..pool.sources.len() {
-            if !matches!(pool.sources[idx].source, Source::Mdx(_)) {
+            if pool.sources[idx].tombstone
+                || !matches!(pool.sources[idx].source, Source::Mdx(_))
+            {
                 continue;
             }
             let name = pool.sources[idx].name.trim_end_matches(".mdx").to_string();
             let out_path = out_dir.join(format!("{name}.edited.mdx"));
-            let file = rebuild_mdx_source(pool, overlay, idx, &out_path)?;
+            let file = rebuild_mdx_source(pool, overlay, idx, &out_path, ctl)?;
             report.ok |= file.check_ok;
             report.files.push(file);
         }
@@ -385,7 +408,7 @@ pub fn export_build(
             let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
             let out_path = out_dir.join(format!("{name}.edited.mdd"));
             let (file, skipped) =
-                rebuild_mdd_source(pool, overlay, idx, &out_path, &externals, None)?;
+                rebuild_mdd_source(pool, overlay, idx, &out_path, &externals, None, ctl)?;
             report.ok |= file.check_ok;
             report.skipped_externals.extend(skipped);
             report.files.push(file);
@@ -427,7 +450,9 @@ pub fn export_build(
     if let Some(lossy_steps) = &config.lossy {
         if !lossy_steps.is_empty() {
             for idx in 0..pool.sources.len() {
-                if !matches!(pool.sources[idx].source, Source::Mdd(_)) {
+                if pool.sources[idx].tombstone
+                    || !matches!(pool.sources[idx].source, Source::Mdd(_))
+                {
                     continue;
                 }
                 let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
@@ -439,6 +464,7 @@ pub fn export_build(
                     &out_path,
                     &externals,
                     Some(lossy_steps),
+                    ctl,
                 )?;
                 report.ok |= file.check_ok;
                 report.skipped_externals.extend(skipped);
@@ -468,5 +494,5 @@ pub fn export_build(
 fn first_mdd_index(pool: &SourcePool) -> Option<usize> {
     pool.sources
         .iter()
-        .position(|e| matches!(e.source, Source::Mdd(_)))
+        .position(|e| !e.tombstone && matches!(e.source, Source::Mdd(_)))
 }

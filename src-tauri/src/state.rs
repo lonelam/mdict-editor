@@ -5,6 +5,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    path::Path,
     path::PathBuf,
     sync::Mutex,
 };
@@ -44,6 +45,11 @@ pub enum Source {
 pub struct SourceEntry {
     pub name: String,
     pub title: Option<String>,
+    /// Canonical filesystem path; identical re-opens are deduped on it.
+    pub path: PathBuf,
+    /// Tombstone: removed sources keep their slot (ids stay stable) but are
+    /// skipped by every iteration and refused by [`SourcePool::get`].
+    pub tombstone: bool,
     pub source: Source,
 }
 
@@ -73,7 +79,8 @@ pub struct SourcePool {
 
 impl SourcePool {
     /// Opens one path as a source: .mdx / .mdd via mdictlib, anything else
-    /// (js/css/…) as an external file held in memory.
+    /// (js/css/…) as an external file held in memory. `path` is canonicalized
+    /// so re-opens of the same file can be deduped.
     pub fn open_path(path: &str) -> Result<SourceEntry, String> {
         let p = std::path::Path::new(path);
         let name = p
@@ -85,6 +92,7 @@ impl SourcePool {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
         match ext.as_str() {
             "mdx" => {
                 let file = MdxFile::open(path).map_err(|e| format!("{name}: {e}"))?;
@@ -92,6 +100,8 @@ impl SourcePool {
                 Ok(SourceEntry {
                     name,
                     title,
+                    path: canonical,
+                    tombstone: false,
                     source: Source::Mdx(file),
                 })
             }
@@ -100,6 +110,8 @@ impl SourcePool {
                 Ok(SourceEntry {
                     name,
                     title: None,
+                    path: canonical,
+                    tombstone: false,
                     source: Source::Mdd(file),
                 })
             }
@@ -111,6 +123,8 @@ impl SourcePool {
                 Ok(SourceEntry {
                     name,
                     title: None,
+                    path: canonical,
+                    tombstone: false,
                     source: Source::External {
                         path: p.to_path_buf(),
                         bytes,
@@ -120,11 +134,34 @@ impl SourcePool {
         }
     }
 
+    pub fn has_active_path(&self, canonical: &Path) -> bool {
+        self.sources
+            .iter()
+            .any(|e| !e.tombstone && e.path == canonical)
+    }
+
+    /// Tombstones a source: the slot (and therefore every ResourceId that
+    /// points into it) stays stable, but the source disappears from all
+    /// listings, lookups and exports.
+    pub fn remove(&mut self, idx: usize) -> Result<(), String> {
+        let entry = self
+            .sources
+            .get_mut(idx)
+            .ok_or_else(|| format!("source index {idx} not loaded"))?;
+        entry.tombstone = true;
+        Ok(())
+    }
+
     pub fn get(&self, id: &ResourceId) -> Result<&SourceEntry, String> {
         let idx = id.source_index() as usize;
-        self.sources
+        let entry = self
+            .sources
             .get(idx)
-            .ok_or_else(|| format!("source index {idx} not loaded"))
+            .ok_or_else(|| format!("source index {idx} not loaded"))?;
+        if entry.tombstone {
+            return Err(format!("source index {idx} has been removed"));
+        }
+        Ok(entry)
     }
 
     /// Original bytes of a resource, ignoring the overlay.

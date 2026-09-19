@@ -73,7 +73,9 @@
     }
     busy = true;
     try {
-      const reports = await api.pipelineApply(steps as never, { ids: [id] });
+      const reports = await api.runJob<import("../lib/types").StepReport[]>(
+        api.pipelineApplyStart(steps as never, { ids: [id] })
+      );
       const rep = reports[0];
       if (rep.status === "ok") {
         store.toast("ok", `${key}: ${rep.before} → ${rep.after} 字节（-Δ${rep.delta}）`);
