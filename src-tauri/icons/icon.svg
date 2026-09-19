@@ -1,0 +1,38 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1e40af"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+    <filter id="s" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0b1e4b" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- rounded-square app tile -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- M drawn as an open book: spine + two page leaves -->
+  <g filter="url(#s)">
+    <polyline points="212,768 212,320 512,640 812,320 812,768"
+              fill="none" stroke="#ffffff" stroke-width="104"
+              stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- page shading inside the V -->
+  <path d="M 512 640 L 322 431 L 322 700 Q 420 640 512 700 Z"
+        fill="url(#page)" opacity="0.35"/>
+  <path d="M 512 640 L 702 431 L 702 700 Q 604 640 512 700 Z"
+        fill="url(#page)" opacity="0.35"/>
+
+  <!-- pencil: the editor -->
+  <g filter="url(#s)" transform="translate(690,545) rotate(45)">
+    <rect x="-30" y="-160" width="60" height="238" rx="10" fill="#fbbf24"/>
+    <rect x="-30" y="-160" width="60" height="40" rx="10" fill="#f87171"/>
+    <polygon points="-30,78 30,78 0,152" fill="#fde68a"/>
+    <polygon points="-9,118 9,118 0,152" fill="#334155"/>
+  </g>
+</svg>
