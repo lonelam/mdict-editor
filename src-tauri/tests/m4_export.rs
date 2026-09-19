@@ -2,6 +2,7 @@
 
 use mdict_visualizer_lib::export::{export_build, ExportConfig};
 use mdict_visualizer_lib::fixtures;
+use mdict_visualizer_lib::processors::Processor;
 use mdict_visualizer_lib::registry::{self, Registry};
 use mdict_visualizer_lib::state::{AppState, Overlay, ResourceId, SourcePool};
 
@@ -201,4 +202,161 @@ fn export_without_edits_reports_skip() {
     assert_eq!(report.files.len(), 1);
     assert!(!report.files[0].check_ok, "skipped export is not ok");
     assert!(report.files[0].message.contains("no edits"));
+}
+
+/// Lossy compression is export-only: it must produce a compressed copy
+/// alongside the original rebuild **without** ever touching the overlay.
+#[test]
+fn export_lossy_dual_output_and_overlay_untouched() {
+    let (_dir, state) = setup();
+    let out = tempfile::tempdir().unwrap();
+
+    let report = export_build(
+        &state.pool.lock().unwrap(),
+        &Overlay::default(),
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            lossy: Some(vec![Processor::ImgConvert {
+                format: "jpeg".into(),
+                quality: Some(75),
+            }]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Only the lossy copy is produced (no edits → no .edited.mdd).
+    let lossy = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("assets.lossy.mdd"))
+        .expect("lossy mdd emitted");
+    assert!(lossy.check_ok, "{}", lossy.message);
+    assert!(lossy.message.contains("lossy: "));
+    assert!(!report.files.iter().any(|f| f.path.ends_with("assets.edited.mdd")));
+
+    // The overlay must not have received lossy bytes.
+    assert!(state.overlay.lock().unwrap().revisions.is_empty());
+
+    // PNG resources became JPEG inside the lossy copy.
+    let reopened = mdictlib::MddFile::open(&lossy.path).unwrap();
+    let logo = reopened.lookup("img/logo.png").unwrap().expect("logo");
+    assert_eq!(
+        image::guess_format(logo.bytes()).unwrap(),
+        image::ImageFormat::Jpeg
+    );
+}
+
+/// Transparent images must skip the JPEG conversion (no alpha in JPEG).
+#[test]
+fn export_lossy_preserves_transparent_images() {
+    let dir = tempfile::tempdir().unwrap();
+    // Mini mdd holding one transparent RGBA png.
+    let mut img = image::RgbaImage::new(16, 16);
+    for p in img.pixels_mut() {
+        *p = image::Rgba([10, 20, 30, 128]);
+    }
+    let png_path = dir.path().join("alpha.png");
+    image::DynamicImage::ImageRgba8(img)
+        .save_with_format(&png_path, image::ImageFormat::Png)
+        .unwrap();
+    let mut builder = mdictlib::MddBuilder::new();
+    builder
+        .add_resource("img/alpha.png", &std::fs::read(&png_path).unwrap())
+        .unwrap();
+    let mut mdd_bytes = Vec::new();
+    builder.finish(&mut mdd_bytes).unwrap();
+    let mdd_path = dir.path().join("alpha.mdd");
+    std::fs::write(&mdd_path, &mdd_bytes).unwrap();
+
+    let mut state = AppState::default();
+    state
+        .pool
+        .lock()
+        .unwrap()
+        .sources
+        .push(SourcePool::open_path(mdd_path.to_str().unwrap()).unwrap());
+
+    let out = tempfile::tempdir().unwrap();
+    let report = export_build(
+        &state.pool.lock().unwrap(),
+        &Overlay::default(),
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            lossy: Some(vec![Processor::ImgConvert {
+                format: "jpeg".into(),
+                quality: Some(75),
+            }]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let lossy = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("alpha.lossy.mdd"))
+        .expect("lossy emitted");
+    let reopened = mdictlib::MddFile::open(&lossy.path).unwrap();
+    let alpha = reopened.lookup("img/alpha.png").unwrap().expect("alpha");
+    assert_eq!(
+        image::guess_format(alpha.bytes()).unwrap(),
+        image::ImageFormat::Png,
+        "transparent image must stay PNG"
+    );
+    assert_eq!(alpha.bytes(), std::fs::read(&png_path).unwrap());
+}
+
+/// Edited export + lossy copy coexist: originals keep overlay edits, lossy
+/// copy applies transforms on top.
+#[test]
+fn export_edited_and_lossy_coexist() {
+    let (_dir, state) = setup();
+    let out = tempfile::tempdir().unwrap();
+
+    let app_js = ResourceId::Mdd { source: 1, ordinal: 8 };
+    let mut overlay = Overlay::default();
+    overlay.write(
+        app_js.clone(),
+        state.pool.lock().unwrap().read_original(&app_js).unwrap(),
+        b"console.log(\"edited\")".to_vec(),
+    );
+
+    let report = export_build(
+        &state.pool.lock().unwrap(),
+        &overlay,
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            mdd: true,
+            lossy: Some(vec![Processor::ImgConvert {
+                format: "jpeg".into(),
+                quality: Some(75),
+            }]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let edited = report.files.iter().find(|f| f.path.ends_with("assets.edited.mdd")).unwrap();
+    let lossy = report.files.iter().find(|f| f.path.ends_with("assets.lossy.mdd")).unwrap();
+    assert!(edited.check_ok && lossy.check_ok);
+
+    // Both carry the edit; only the lossy copy converts images.
+    let e = mdictlib::MddFile::open(&edited.path).unwrap();
+    let l = mdictlib::MddFile::open(&lossy.path).unwrap();
+    assert_eq!(
+        e.lookup("js/app.js").unwrap().unwrap().bytes(),
+        b"console.log(\"edited\")"
+    );
+    assert_eq!(
+        l.lookup("js/app.js").unwrap().unwrap().bytes(),
+        b"console.log(\"edited\")"
+    );
+    assert_eq!(
+        image::guess_format(e.lookup("img/logo.png").unwrap().unwrap().bytes()).unwrap(),
+        image::ImageFormat::Png
+    );
+    assert_eq!(
+        image::guess_format(l.lookup("img/logo.png").unwrap().unwrap().bytes()).unwrap(),
+        image::ImageFormat::Jpeg
+    );
 }

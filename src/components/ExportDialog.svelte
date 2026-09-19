@@ -11,6 +11,7 @@
   let embed = $state(false);
   let embedTarget = $state<number | null>(null);
   let saveExternals = $state(false);
+  let lossy = $state(false);
 
   let running = $state(false);
   let report = $state<ExportReport | null>(null);
@@ -32,6 +33,9 @@
         embedExternals: embed,
         embedTarget,
         saveExternals,
+        lossy: lossy
+          ? [{ kind: "img-convert", format: "jpeg", quality: 75 }]
+          : null,
       });
       const ok = report.files.filter((f) => f.checkOk).length;
       store.toast(report.ok ? "ok" : "info", `导出完成：${ok}/${report.files.length} 项校验通过`);
@@ -79,6 +83,14 @@
       {:else}
         <p class="note">未加载外部 js/css 文件，嵌入选项不可用。</p>
       {/if}
+      <label>
+        <input type="checkbox" bind:checked={lossy} /> 同时生成有损压缩副本 (.lossy.mdd)
+      </label>
+      <p class="note">
+        有损副本独立于原始版本：原始产物照常导出，改写层与源文件不受影响。
+        当前链：不透明图片转 JPEG q75（透明图自动跳过）；WebP 有损 / Opus 音频 /
+        字体子集化将随后续版本接入。
+      </p>
     </section>
 
     <section class="grow">

@@ -50,9 +50,7 @@ CSS 没有"死规则清除"（词典 CSS 常一半以上规则用不到）。
   与 oxipng 组合是 pngquant 的标准玩法。
 - **Rust 生态**：[`imagequant`](https://crates.io/crates/imagequant)（pngquant 作者
   维护的安全封装；pngquant 2.13+ 的 libimagequant 本身就是 Rust 写的）。
-- **风险**：**许可**——与 pngquant 相同的 GPL/商业双许可；若本项目要非 GPL 分发，
-  需购商业许可或改用有损 WebP 路线（WebP 无许可问题）。→ 列为可选处理器，
-  默认关闭。
+- **许可**：本项目为 MIT 开源 demo，GPL 组件无分发顾虑，可直接使用。
 - **收益量级**：作为 WebP 的补充（需要保 PNG 格式时），单图 60%~75%。
 
 ### 2.3 发音音频 → Opus（词典音频的标准答案）
@@ -110,18 +108,33 @@ CSS 没有"死规则清除"（词典 CSS 常一半以上规则用不到）。
 
 ## 3. 推荐落地路线（管线集成设计）
 
-新增 `Processor` 变体（全部走既有 dry-run/apply/撤销通道，零新概念）：
+### 3.0 执行位置：有损压缩只在导出时进行（架构约束）
 
-| 阶段 | 处理器 | 依赖 | 预设默认 |
-|------|--------|------|---------|
-| P1 | `img-webp { quality: 40..95=65 }` | webpx（feature `proc-webp`） | 开 |
-| P1 | `audio-opus { bitrate_kbps: 16..64=24, mono: true }` | symphonia + libopus（feature `proc-opus`） | 关（兼容性提示） |
-| P2 | `font-subset { codepoints: "from-entries", fallback: "常用字表" }` | allsorts | 开（检测到字体时） |
-| P2 | `css-purge { scan: "all-entries", keep: [] }` | lightningcss（已有） | 开 |
-| P3 | `png-quantize { colors: 256, dithering: 1 }` | imagequant（GPL⚠） | 关 |
-| P4 | `export-zdict { level: 22, dict: 512KB }`（新格式） | zstd | 关（自有格式） |
+有损操作不可逆，因此**绝不进入改写层（Overlay）**，也不出现在交互式批量管线中。
+导出时生成两套产物：
 
-管线 UI 增加"激进压缩 / 均衡 / 兼容优先"三档预设，一键映射到上述处理器组合。
+- `<名>.edited.mdx / .edited.mdd` —— **原始版本**：只含 Overlay 中的显式编辑，内容保真；
+- `<名>.lossy.mdd` —— **压缩副本**：对每个 MDD 源重建时即时套用有损转换链
+  （含保护规则：透明图不转 JPEG；单步失败保留原字节）。
+
+Overlay 与源文件永远拿不到有损后的字节。图片编辑器里的缩放/转格式属于显式的
+单资源编辑（原始字节保存在修订链 `original` 中，可随时还原），与导出有损副本
+是两个通道。有损副本对**所有** MDD 源生成（无论有无编辑），适合直接分发。
+
+新增 `Processor` 变体（有损链在 `ExportConfig.lossy` 传入，复用 dry-run 式
+"单项失败不断批"的语义；无损处理器仍走交互管线）：
+
+| 阶段 | 处理器 | 依赖 | 应用时机 | 默认 |
+|------|--------|------|---------|------|
+| P1 | `img-webp { quality: 40..95=65 }` | webpx（feature `proc-webp`） | 导出 | 开 |
+| P1 | `png-quantize { colors: 256 }` | imagequant | 导出 | 开 |
+| P2 | `audio-opus { bitrate_kbps: 16..64=24, mono: true }` | symphonia + libopus（feature `proc-opus`） | 导出 | 关（兼容性提示） |
+| P2 | `font-subset { codepoints: "from-entries", fallback: "常用字表" }` | allsorts | 导出 | 开（检测到字体时） |
+| P3 | `css-purge { scan: "all-entries", keep: [] }` | lightningcss（已有） | 导出 | 开 |
+| P4 | `export-zdict { level: 22, dict: 512KB }`（新格式） | zstd | 导出 | 关（自有格式） |
+
+管线 UI 增加"激进压缩 / 均衡 / 兼容优先"三档导出预设，一键映射到上述组合；
+前端首版已内置 `img-convert jpeg q75` 的保守链。
 
 ## 4. 达标测算（10%~30%）
 

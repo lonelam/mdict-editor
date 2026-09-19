@@ -325,7 +325,7 @@ PipelineDialog
  ⑤ 撤销:   单项 revert 或整批 revert（Overlay 的 Revision 天然支持）
 ```
 
-要点：管线**只写 Overlay 不落盘**，与手动编辑同一套撤销/导出通道，无双轨。文本处理器失败（语法错误）必须逐项报错而非中断整批。
+要点：管线**只写 Overlay 不落盘**，与手动编辑同一套撤销/导出通道，无双轨。文本处理器失败（语法错误）必须逐项报错而非中断整批。**有损边界**（v2 修订）：批量管线仅含无损处理器；有损转换（WebP 有损/Opus/量化/字体子集化等）不可逆，只在**导出阶段**执行并生成独立副本，原始版本照常导出，Overlay 与源文件永不接触有损字节——详见 COMPRESSION_RESEARCH.md §3.0。
 
 ---
 
@@ -348,6 +348,8 @@ ExportDialog
                     rebuild_mdx(source, edits, WriteOptions{utf8, zlib})
    □ MDD 重建   —— 新 MddBuilder；遍历 resources() 流式搬运，Overlay 替换、deleted 跳过；
                     勾选的外部 js/css 以 add_resource 嵌入指定前缀路径(默认 /)
+   □ 有损压缩副本 —— 可选；对所有 MDD 源额外生成 `<名>.lossy.mdd`：重建时即时套用
+                    有损链（导出专属，Overlay 不变），与原始版本并存供分发
    □ 外部文件另存 —— 不嵌入而写到输出目录旁
   构建后自检: 重新 MdxFile::open/MddFile::open 校验条目数与抽查 lookup → 绿勾报告（字节数/条目数/耗时）
 ```

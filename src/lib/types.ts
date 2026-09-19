@@ -88,6 +88,8 @@ export interface ExportConfig {
   embedExternals: boolean;
   embedTarget: number | null;
   saveExternals: boolean;
+  /** Lossy chain applied only to the `.lossy.mdd` copy; originals unaffected. */
+  lossy: Processor[] | null;
 }
 
 export interface ExportedFile {

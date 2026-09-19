@@ -8,6 +8,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::category::Category;
+use crate::processors::Processor;
 use crate::registry::normalize_key;
 use crate::state::{current_bytes, Overlay, ResourceId, Source, SourcePool};
 
@@ -25,6 +27,11 @@ pub struct ExportConfig {
     pub embed_target: Option<u32>,
     /// Copy external files' current content next to the outputs.
     pub save_externals: bool,
+    /// Lossy transform chain applied **only** to a compressed copy
+    /// (`<name>.lossy.mdd`) emitted alongside the original rebuild. The
+    /// overlay and every other output never see lossy bytes — lossy
+    /// compression is irreversible, so it happens exclusively at export.
+    pub lossy: Option<Vec<Processor>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,13 +159,16 @@ fn rebuild_mdx_source(
 }
 
 /// Rebuilds one MDD source (overlay applied) into `out_path`, optionally
-/// embedding externals. Returns (file, skipped-external names).
+/// embedding externals. When `lossy` steps are given, every resource is
+/// transformed on the fly while copying — the overlay itself is never fed
+/// lossy bytes. Returns (file, skipped-external names).
 fn rebuild_mdd_source(
     pool: &SourcePool,
     overlay: &Overlay,
     src_idx: usize,
     out_path: &Path,
     externals: &[(String, Vec<u8>)],
+    lossy: Option<&[Processor]>,
 ) -> Result<(ExportedFile, Vec<String>), String> {
     let Source::Mdd(file) = &pool.sources[src_idx].source else {
         return Err("not an mdd source".into());
@@ -179,32 +189,40 @@ fn rebuild_mdd_source(
 
     let mut deleted = 0u64;
     let mut rewritten = 0u64;
+    let mut lossy_changed = 0u64;
+    let mut lossy_total = 0u64;
     for key in file.keys() {
         let key = key.map_err(|e| e.to_string())?;
         let ordinal = key.ordinal().get();
-        let id = ResourceId::Mdd {
-            source: src_idx as u32,
-            ordinal,
-        };
         let name = key.key().to_string();
-        match edits_map.get(&(src_idx as u32, ordinal)) {
+        let raw: Vec<u8> = match edits_map.get(&(src_idx as u32, ordinal)) {
             Some(rev) if rev.deleted => {
                 deleted += 1;
+                continue;
             }
             Some(rev) => {
-                builder.add_resource(&name, &rev.current).map_err(|e| e.to_string())?;
                 rewritten += 1;
+                rev.current.clone()
             }
-            None => {
-                let bytes = file
-                    .resource_at(key.ordinal())
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("resource {name} missing"))?
-                    .bytes()
-                    .to_vec();
-                builder.add_resource(&name, &bytes).map_err(|e| e.to_string())?;
+            None => file
+                .resource_at(key.ordinal())
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("resource {name} missing"))?
+                .bytes()
+                .to_vec(),
+        };
+        let bytes = match lossy {
+            Some(steps) => {
+                lossy_total += 1;
+                let (out, changed) = apply_lossy(steps, &name, &raw);
+                if changed {
+                    lossy_changed += 1;
+                }
+                out
             }
-        }
+            None => raw,
+        };
+        builder.add_resource(&name, &bytes).map_err(|e| e.to_string())?;
     }
 
     // Embed externals, skipping keys that collide with existing resources.
@@ -248,6 +266,14 @@ fn rebuild_mdd_source(
             }
         }
     }
+    if lossy.is_some() {
+        if !message.is_empty() {
+            message.push_str("; ");
+        }
+        message.push_str(&format!(
+            "lossy: {lossy_changed}/{lossy_total} resources transformed"
+        ));
+    }
     Ok((
         ExportedFile {
             path: out_path.display().to_string(),
@@ -258,6 +284,42 @@ fn rebuild_mdd_source(
         },
         skipped,
     ))
+}
+
+/// Applies the lossy chain to one resource on the fly. A failing step keeps
+/// the previous bytes (lossy must never break the export). JPEG has no alpha
+/// channel, so transparent images skip JPEG conversion.
+fn apply_lossy(steps: &[Processor], key: &str, bytes: &[u8]) -> (Vec<u8>, bool) {
+    let mut current = bytes.to_vec();
+    for step in steps {
+        if !step.applies_to(Category::from_key(&normalize_key(key))) {
+            continue;
+        }
+        if let Processor::ImgConvert { format, .. } = step {
+            if format.eq_ignore_ascii_case("jpeg") && has_alpha(bytes) {
+                continue;
+            }
+        }
+        if let Ok(out) = step.process(key, &current) {
+            current = out;
+        }
+    }
+    let changed = current != bytes;
+    (current, changed)
+}
+
+/// True when the image bytes carry non-opaque alpha.
+fn has_alpha(bytes: &[u8]) -> bool {
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    match img {
+        image::DynamicImage::ImageRgba8(rgba) => rgba.pixels().any(|p| p.0[3] != 255),
+        _ => img
+            .to_rgba8()
+            .pixels()
+            .any(|p| p.0[3] != 255),
+    }
 }
 
 /// Current content of all external files (overlay-aware), sorted by name.
@@ -302,24 +364,28 @@ pub fn export_build(
         }
     }
 
+    // A source receives the embedded externals when explicitly targeted, or
+    // implicitly as "the first MDD source" when no target was chosen.
+    let receives_embed = |idx: usize| -> bool {
+        config.embed_externals
+            && match config.embed_target {
+                Some(t) => t as usize == idx,
+                None => first_mdd_index(pool) == Some(idx),
+            }
+    };
+
     if config.mdd {
         for idx in 0..pool.sources.len() {
-            let receives_embed = config.embed_externals
-                && match config.embed_target {
-                    Some(t) => t as usize == idx,
-                    // None targets the first MDD source; if none exists we
-                    // fall through to the standalone externals file below.
-                    None => idx == first_mdd_index(pool).unwrap_or(usize::MAX),
-                };
             let has_edits = overlay.revisions.keys().any(
                 |id| matches!(id, ResourceId::Mdd { source, .. } if *source as usize == idx),
             );
-            if !has_edits && !receives_embed {
+            if !has_edits && !receives_embed(idx) {
                 continue;
             }
             let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
             let out_path = out_dir.join(format!("{name}.edited.mdd"));
-            let (file, skipped) = rebuild_mdd_source(pool, overlay, idx, &out_path, &externals)?;
+            let (file, skipped) =
+                rebuild_mdd_source(pool, overlay, idx, &out_path, &externals, None)?;
             report.ok |= file.check_ok;
             report.skipped_externals.extend(skipped);
             report.files.push(file);
@@ -352,6 +418,32 @@ pub fn export_build(
                 check_ok,
                 message: String::new(),
             });
+        }
+    }
+
+    // Lossy copies: emitted for **every** MDD source (edited or not), built
+    // from the same overlay state but with the lossy chain applied on the
+    // fly. Purely additive — the original rebuilds above are unaffected.
+    if let Some(lossy_steps) = &config.lossy {
+        if !lossy_steps.is_empty() {
+            for idx in 0..pool.sources.len() {
+                if !matches!(pool.sources[idx].source, Source::Mdd(_)) {
+                    continue;
+                }
+                let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
+                let out_path = out_dir.join(format!("{name}.lossy.mdd"));
+                let (file, skipped) = rebuild_mdd_source(
+                    pool,
+                    overlay,
+                    idx,
+                    &out_path,
+                    &externals,
+                    Some(lossy_steps),
+                )?;
+                report.ok |= file.check_ok;
+                report.skipped_externals.extend(skipped);
+                report.files.push(file);
+            }
         }
     }
 
