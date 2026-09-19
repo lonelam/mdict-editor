@@ -1,5 +1,7 @@
 # mdict-editor
 
+
+[![build](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml/badge.svg)](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)
 基于 Tauri 2 + SvelteKit(Svelte 5) 的 MDict 词典可视化编辑工具，通过本地 path 依赖链接
 [`mdictlib`](../mdictlib)（`src-tauri/Cargo.toml` 中 `../../mdictlib`，启用 `lzo` feature）。
 
@@ -26,6 +28,10 @@
   （当前链：不透明图片转 JPEG q75），原始版本照常导出，Overlay 与源文件不受影响
 - **撤销模型**：所有编辑（手动/管线/删除标记）只写入内存 Overlay（每资源 32 版历史），
   源文件永不被修改；支持逐版撤销与整链还原
+
+## 下载
+
+打 `v*` 标签或手动触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建三端安装包并自动发布到 GitHub Releases：Windows（NSIS/MSI）、macOS（Universal DMG，Apple Silicon + Intel）、Linux（AppImage/deb）。
 
 ## 运行
 
