@@ -31,7 +31,7 @@ jobs:
 
       - name: Clone mdictlib (path dependency)
         shell: bash
-        run: git clone --depth 1 https://github.com/lonelam/mdictlib "$GITHUB_WORKSPACE/../mdictlib"
+        run: git clone --depth 1 --branch v0.2.8 https://github.com/lonelam/mdictlib "$GITHUB_WORKSPACE/../mdictlib"
 
       - uses: actions/setup-node@v4
         with:
