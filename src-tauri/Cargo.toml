@@ -1,0 +1,61 @@
+[package]
+name = "mdict-visualizer"
+version = "0.1.0"
+description = "Visual reader and editor for MDict .mdx/.mdd resources, built on mdictlib"
+authors = ["laizn"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This is only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "mdict_visualizer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Locally linked mdictlib (sibling checkout): MDX/MDD parsing, lookup and editing.
+mdictlib = { path = "../../mdictlib", features = ["lzo"] }
+base64 = "0.22"
+percent-encoding = "2"
+
+# Pipeline processors (see docs/DESIGN.md §8)
+lightningcss = "1.0.0-alpha.72"
+minify-html = "0.16"
+oxipng = { version = "9", default-features = false, features = ["parallel"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+tempfile = "3"
+
+# JS minifier (swc umbrella crate; heavy — gate behind a feature so
+# `--no-default-features` can skip it, see docs/DESIGN.md §12).
+swc_core = { version = "80", default-features = false, features = [
+    "common",
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_codegen",
+    "ecma_minifier",
+    "ecma_visit",
+] }
+
+[features]
+default = ["processors-js"]
+processors-js = []
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
