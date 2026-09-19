@@ -66,9 +66,6 @@
 <aside class="explorer">
   <header>
     <h2>资源</h2>
-    <button class="open" onclick={() => store.openFiles()} disabled={store.loading}>
-      {store.sources.length === 0 ? "打开文件" : "追加"}
-    </button>
   </header>
   <input
     class="search"
@@ -158,16 +155,6 @@
     padding: 10px 12px 8px;
   }
   h2 { margin: 0; font-size: 13px; }
-  .open {
-    border: none;
-    border-radius: 6px;
-    background: var(--accent);
-    color: #fff;
-    font-size: 12px;
-    padding: 5px 10px;
-    cursor: pointer;
-  }
-  .open:disabled { opacity: 0.6; }
   .search {
     margin: 0 12px 8px;
     padding: 5px 8px;
