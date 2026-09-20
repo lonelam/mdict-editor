@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::Path,
     path::PathBuf,
-    sync::Mutex,
+    sync::RwLock,
 };
 
 use mdictlib::{MddFile, MdxFile};
@@ -324,10 +324,12 @@ pub fn current_bytes(
     }
 }
 
-/// Global managed state. Lock order is always pool → overlay → registry.
+/// Global managed state. RwLock so long-running readers (export, pipeline,
+/// preview) never block UI reads; writers stay mutually exclusive. Lock
+/// order is always pool → overlay → registry.
 #[derive(Default)]
 pub struct AppState {
-    pub pool: Mutex<SourcePool>,
-    pub overlay: Mutex<Overlay>,
-    pub registry: Mutex<Registry>,
+    pub pool: RwLock<SourcePool>,
+    pub overlay: RwLock<Overlay>,
+    pub registry: RwLock<Registry>,
 }

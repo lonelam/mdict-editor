@@ -23,11 +23,11 @@ fn setup() -> Env {
     let (mdx, mdd, ext_css, ext_js) = fixtures::write_all(dir.path());
     let mut state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in [&mdx, &mdd, &ext_css, &ext_js] {
             pool.sources.push(SourcePool::open_path(p).unwrap());
         }
-        let mut registry = state.registry.lock().unwrap();
+        let mut registry = state.registry.write().unwrap();
         registry::ensure_built(&pool, &mut registry).unwrap();
     }
     // Sorted mdd rows: audio/hello.wav=0, css/extra.css=1, css/style.css=2,
@@ -68,8 +68,8 @@ fn normalize_paths() {
 fn relative_resolution_from_css_context() {
     let env = setup();
     let out = resolve(
-        &env.state.pool.lock().unwrap(),
-        &env.state.registry.lock().unwrap(),
+        &env.state.pool.read().unwrap(),
+        &env.state.registry.write().unwrap(),
         "../img/heart.png",
         Some(&env.mdd_style),
     )
@@ -82,8 +82,8 @@ fn relative_resolution_from_css_context() {
 #[test]
 fn root_and_bare_and_percent() {
     let env = setup();
-    let pool = env.state.pool.lock().unwrap();
-    let registry = env.state.registry.lock().unwrap();
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.write().unwrap();
 
     // Root-anchored from an MDX entry context.
     let (t, basis) = found_of(resolve(&pool, &registry, "/img/logo.png", Some(&env.mdx_hello)).unwrap());
@@ -103,8 +103,8 @@ fn root_and_bare_and_percent() {
 #[test]
 fn schemes() {
     let env = setup();
-    let pool = env.state.pool.lock().unwrap();
-    let registry = env.state.registry.lock().unwrap();
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.write().unwrap();
 
     // entry:// jumps into the MDX.
     let (t, basis) = found_of(resolve(&pool, &registry, "entry://world", Some(&env.mdx_hello)).unwrap());
@@ -138,18 +138,18 @@ fn suffix_fallback_and_ambiguity() {
     let env = setup();
     env.state
         .pool
-        .lock()
+        .write()
         .unwrap()
         .sources
         .push(SourcePool::open_path(dup_path.to_str().unwrap()).unwrap());
     {
-        let pool = env.state.pool.lock().unwrap();
-        let mut registry = env.state.registry.lock().unwrap();
+        let pool = env.state.pool.read().unwrap();
+        let mut registry = env.state.registry.write().unwrap();
         registry::ensure_built(&pool, &mut registry).unwrap();
     }
 
-    let pool = env.state.pool.lock().unwrap();
-    let registry = env.state.registry.lock().unwrap();
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.write().unwrap();
 
     // Key is img/logo.png but authors write logo.png → unique suffix hit.
     let (t, basis) = found_of(resolve(&pool, &registry, "logo.png", Some(&env.mdx_hello)).unwrap());
@@ -176,8 +176,8 @@ fn suffix_fallback_and_ambiguity() {
 #[test]
 fn case_insensitive_keys() {
     let env = setup();
-    let pool = env.state.pool.lock().unwrap();
-    let registry = env.state.registry.lock().unwrap();
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.write().unwrap();
     let (t, _) = found_of(resolve(&pool, &registry, "/IMG/LOGO.PNG", None).unwrap());
     assert_eq!(t, env.mdd_logo);
 }
@@ -228,7 +228,7 @@ fn mdres_uses_overlay_bytes() {
     let edited = b"/* edited */\n.entry { color: red; }".to_vec();
     env.state
         .overlay
-        .lock()
+        .write()
         .unwrap()
         .write(env.mdd_style.clone(), vec![], edited);
     let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdd-1-2/");
@@ -238,8 +238,8 @@ fn mdres_uses_overlay_bytes() {
 #[test]
 fn resolve_path_public_api_sound() {
     let env = setup();
-    let pool = env.state.pool.lock().unwrap();
-    let registry = env.state.registry.lock().unwrap();
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.write().unwrap();
     let (t, _) = found_of(resolve_path(&pool, &registry, "/audio/hello.wav", None).unwrap());
     assert_eq!(t, ResourceId::Mdd { source: 1, ordinal: 0 });
 }

@@ -5,8 +5,7 @@ name: build
 #   with the installers (NSIS/MSI, universal DMG, AppImage/deb)
 # - manual dispatch → artifacts on the workflow run
 #
-# The workspace depends on the sibling `mdictlib` checkout (path dependency
-# `../../mdictlib`); CI clones it next to this repository.
+# mdictlib comes from crates.io; no sibling checkout is needed.
 
 on:
   push:
@@ -28,10 +27,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Clone mdictlib (path dependency)
-        shell: bash
-        run: git clone --depth 1 https://github.com/lonelam/mdictlib "$GITHUB_WORKSPACE/../mdictlib"
 
       - uses: actions/setup-node@v4
         with:

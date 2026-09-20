@@ -54,6 +54,20 @@ class AppStore {
 
   // ---- sources ----
 
+  /** Rehydrates sources after an HMR refresh / app reload: the backend keeps
+   *  its pool (and overlay), so the frontend just resyncs the list. */
+  async init() {
+    try {
+      const sources = await api.listSources();
+      if (sources.length > 0) {
+        this.sources = sources;
+        for (const s of sources) void this.refreshStats(s.id);
+      }
+    } catch {
+      // backend not ready (first boot) — openFiles will drive state
+    }
+  }
+
   async openFiles() {
     try {
       const paths = await open({

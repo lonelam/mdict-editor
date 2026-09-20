@@ -12,14 +12,14 @@ fn setup() -> (tempfile::TempDir, AppState) {
     let (mdx, mdd, ext_css, ext_js) = fixtures::write_all(dir.path());
     let state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in [&mdx, &mdd, &ext_css, &ext_js] {
             pool.sources.push(SourcePool::open_path(p).unwrap());
         }
     }
     {
-        let pool = state.pool.lock().unwrap();
-        let mut registry = state.registry.lock().unwrap();
+        let pool = state.pool.read().unwrap();
+        let mut registry = state.registry.write().unwrap();
         registry::ensure_built(&pool, &mut registry).unwrap();
     }
     (dir, state)
@@ -42,7 +42,7 @@ fn insert_entry_materializes_at_export() {
 
     let out = out_dir();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -90,7 +90,7 @@ fn insert_resource_materializes_with_lossy_chain() {
 
     let out = out_dir();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -129,8 +129,8 @@ fn duplicate_insertion_keys_rejected_by_commands() {
     // Command-level validation is exercised through the command fns; here we
     // verify the dedupe predicates used by them: source index + pending list.
     let (_dir, state) = setup();
-    let pool = state.pool.lock().unwrap();
-    let registry = state.registry.lock().unwrap();
+    let pool = state.pool.read().unwrap();
+    let registry = state.registry.write().unwrap();
     let mut overlay = Overlay::default();
 
     // "hello" exists in the mdx index (source 0).
@@ -181,7 +181,7 @@ fn remove_insertion_restores_clean_export() {
 
     let out = out_dir();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),

@@ -36,7 +36,7 @@ pub struct StepReport {
     pub message: String,
 }
 
-fn select_targets(
+pub fn select_targets(
     pool: &SourcePool,
     overlay: &Overlay,
     registry: &Registry,
@@ -203,6 +203,18 @@ pub fn dry_run(
     ctl: &JobCtl,
 ) -> Result<Vec<StepReport>, String> {
     let metas = select_targets(pool, overlay, registry, scope)?;
+    dry_run_selected(pool, overlay, steps, metas, ctl)
+}
+
+/// Runs on a pre-selected target snapshot — callers drop their registry lock
+/// before the (potentially minutes-long) walk so UI reads stay live.
+pub fn dry_run_selected(
+    pool: &SourcePool,
+    overlay: &Overlay,
+    steps: &[Processor],
+    metas: Vec<crate::registry::ResourceMeta>,
+    ctl: &JobCtl,
+) -> Result<Vec<StepReport>, String> {
     run_steps(pool, overlay, steps, metas, ctl, |_, _| {})
 }
 
@@ -215,11 +227,34 @@ pub fn apply(
     ctl: &JobCtl,
 ) -> Result<Vec<StepReport>, String> {
     let metas = select_targets(pool, overlay, registry, scope)?;
+    let (reports, applied) = apply_selected(pool, overlay, steps, metas, ctl)?;
+    commit_applied(pool, overlay, applied)?;
+    Ok(reports)
+}
+
+/// Runs the walk with a read-only overlay and returns the pending writes
+/// alongside the reports; the caller commits them under a short write lock
+/// so long applies never block preview readers.
+pub fn apply_selected(
+    pool: &SourcePool,
+    overlay: &Overlay,
+    steps: &[Processor],
+    metas: Vec<crate::registry::ResourceMeta>,
+    ctl: &JobCtl,
+) -> Result<(Vec<StepReport>, Vec<(ResourceId, Vec<u8>)>), String> {
     let mut applied: Vec<(ResourceId, Vec<u8>)> = Vec::new();
     let reports = run_steps(pool, overlay, steps, metas, ctl, |id, bytes| {
         applied.push((id, bytes));
     })?;
-    // Deferred writes keep the closure uniform between dry_run and apply.
+    Ok((reports, applied))
+}
+
+/// Bulk-commits pipeline results; hold the overlay write lock only here.
+pub fn commit_applied(
+    pool: &SourcePool,
+    overlay: &mut Overlay,
+    applied: Vec<(ResourceId, Vec<u8>)>,
+) -> Result<(), String> {
     for (id, bytes) in applied {
         let original = match overlay.get(&id) {
             Some(rev) => rev.original.clone(),
@@ -227,5 +262,5 @@ pub fn apply(
         };
         overlay.write(id, original, bytes);
     }
-    Ok(reports)
+    Ok(())
 }

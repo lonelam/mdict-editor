@@ -42,11 +42,11 @@ fn extract_refs(html: &str) -> Vec<String> {
 fn open_state(paths: &[&str]) -> AppState {
     let state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in paths {
             pool.sources.push(SourcePool::open_path(p).expect(p));
         }
-        let mut registry = state.registry.lock().unwrap();
+        let mut registry = state.registry.write().unwrap();
         registry::ensure_built(&pool, &mut registry).expect("index build");
     }
     state
@@ -74,7 +74,7 @@ fn real_ahd_full_combo() {
     let state = open_state(&[&mdx, &mdd, &css, &js]);
     let t_open = t0.elapsed();
 
-    let (pool, registry) = (state.pool.lock().unwrap(), state.registry.lock().unwrap());
+    let (pool, registry) = (state.pool.read().unwrap(), state.registry.write().unwrap());
     let counts: Vec<u64> = pool.sources.iter().map(|s| s.entry_count()).collect();
     println!(
         "AHD opened+indexed in {t_open:?}: entries={} mdd={} ext×2",
@@ -83,7 +83,7 @@ fn real_ahd_full_combo() {
     assert!(counts[0] > 10_000, "AHD should have many entries");
 
     // Stats cover all expected categories.
-    let stats = registry::stats(&pool, &state.overlay.lock().unwrap(), &registry, None).unwrap();
+    let stats = registry::stats(&pool, &state.overlay.read().unwrap(), &registry, None).unwrap();
     let cats: Vec<Category> = stats.iter().map(|s| s.category).collect();
     assert!(cats.contains(&Category::Entry));
     assert!(cats.contains(&Category::Css) || cats.contains(&Category::Js));
@@ -140,7 +140,7 @@ fn real_wordnet_index_and_paging() {
     let t0 = Instant::now();
     let state = open_state(&[WORDNET]);
     let elapsed = t0.elapsed();
-    let (pool, registry) = (state.pool.lock().unwrap(), state.registry.lock().unwrap());
+    let (pool, registry) = (state.pool.read().unwrap(), state.registry.write().unwrap());
     let count = pool.sources[0].entry_count();
     println!("WordNet ({count} entries) indexed in {elapsed:?}");
     assert!(count > 100_000);
@@ -152,7 +152,7 @@ fn real_wordnet_index_and_paging() {
     loop {
         let page = registry::list_resources(
             &pool,
-            &state.overlay.lock().unwrap(),
+            &state.overlay.read().unwrap(),
             &registry,
             &ListFilter { source: None, category: None, prefix: "", offset, limit: 100 },
         )
@@ -172,7 +172,7 @@ fn real_wordnet_index_and_paging() {
     // Prefix query on a real word.
     let rows = registry::list_resources(
         &pool,
-        &state.overlay.lock().unwrap(),
+        &state.overlay.read().unwrap(),
         &registry,
         &ListFilter { source: None, category: None, prefix: "comput", offset: 0, limit: 50 },
     )
@@ -190,7 +190,7 @@ fn real_longman_large_index() {
     let t0 = Instant::now();
     let state = open_state(&[LONGMAN]);
     let elapsed = t0.elapsed();
-    let pool = state.pool.lock().unwrap();
+    let pool = state.pool.read().unwrap();
     let count = pool.sources[0].entry_count();
     println!("Longman ({count} entries, ~155MB) indexed in {elapsed:?}");
     assert!(count > 50_000);

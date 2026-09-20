@@ -11,11 +11,11 @@ fn setup() -> (tempfile::TempDir, AppState) {
     let (mdx, mdd, ext_css, ext_js) = fixtures::write_all(dir.path());
     let mut state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in [&mdx, &mdd, &ext_css, &ext_js] {
             pool.sources.push(SourcePool::open_path(p).unwrap());
         }
-        let mut registry = state.registry.lock().unwrap();
+        let mut registry = state.registry.write().unwrap();
         registry::ensure_built(&pool, &mut registry).unwrap();
     }
     (dir, state)
@@ -113,9 +113,9 @@ fn png_optimize_and_resize_and_convert() {
 #[test]
 fn pipeline_dry_run_reports_without_writing() {
     let (_dir, state) = setup();
-    let pool = state.pool.lock().unwrap();
-    let overlay = state.overlay.lock().unwrap();
-    let registry = state.registry.lock().unwrap();
+    let pool = state.pool.read().unwrap();
+    let overlay = state.overlay.read().unwrap();
+    let registry = state.registry.write().unwrap();
 
     // Category-scoped css+js minify.
     let reports = pipeline::dry_run(
@@ -147,9 +147,9 @@ fn pipeline_apply_writes_overlay_and_reverts() {
         ..Default::default()
     };
     {
-        let pool = state.pool.lock().unwrap();
-        let mut overlay = state.overlay.lock().unwrap();
-        let mut registry = state.registry.lock().unwrap();
+        let pool = state.pool.read().unwrap();
+        let mut overlay = state.overlay.write().unwrap();
+        let mut registry = state.registry.write().unwrap();
         let reports = pipeline::apply(
             &pool,
             &mut overlay,
@@ -163,7 +163,7 @@ fn pipeline_apply_writes_overlay_and_reverts() {
     }
     let app_js = ResourceId::Mdd { source: 1, ordinal: 8 };
     let (rev_original_len, rev_current_len, minified_ok) = {
-        let overlay = state.overlay.lock().unwrap();
+        let overlay = state.overlay.read().unwrap();
         let rev = overlay.get(&app_js).expect("applied");
         (
             rev.original.len(),
@@ -175,7 +175,7 @@ fn pipeline_apply_writes_overlay_and_reverts() {
     assert!(minified_ok, "minified js no longer has comments");
 
     // Revert everything back.
-    let mut overlay = state.overlay.lock().unwrap();
+    let mut overlay = state.overlay.write().unwrap();
     let ids: Vec<ResourceId> = overlay.revisions.keys().cloned().collect();
     for id in ids {
         overlay.revert(&id);
@@ -186,9 +186,9 @@ fn pipeline_apply_writes_overlay_and_reverts() {
 #[test]
 fn pipeline_per_item_errors_do_not_break_batch() {
     let (_dir, state) = setup();
-    let pool = state.pool.lock().unwrap();
-    let overlay = state.overlay.lock().unwrap();
-    let registry = state.registry.lock().unwrap();
+    let pool = state.pool.read().unwrap();
+    let overlay = state.overlay.read().unwrap();
+    let registry = state.registry.write().unwrap();
 
     // png-optimize only applies to png; text files get "skip".
     let reports = pipeline::dry_run(
@@ -215,9 +215,9 @@ fn pipeline_per_item_errors_do_not_break_batch() {
 #[test]
 fn pipeline_empty_processor_set_skips_everything() {
     let (_dir, state) = setup();
-    let pool = state.pool.lock().unwrap();
-    let overlay = state.overlay.lock().unwrap();
-    let registry = state.registry.lock().unwrap();
+    let pool = state.pool.read().unwrap();
+    let overlay = state.overlay.read().unwrap();
+    let registry = state.registry.write().unwrap();
     let reports = pipeline::dry_run(
         &pool,
         &overlay,

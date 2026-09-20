@@ -21,6 +21,10 @@ export async function removeSource(id: number): Promise<boolean> {
   return invoke("remove_source", { id });
 }
 
+export async function listSources(): Promise<SourceInfo[]> {
+  return invoke("list_sources");
+}
+
 // ---- long-running jobs (progress + cancel via events) ----
 
 interface JobProgress {
@@ -45,21 +49,37 @@ export async function runJob<T>(
   start: Promise<string>,
   onProgress?: (done: number, total: number, item: string) => void
 ): Promise<T> {
-  const job = await start;
-  return new Promise<T>((resolve, reject) => {
-    const unP = listen<JobProgress>("job-progress", (e) => {
-      if (e.payload.job === job) {
-        onProgress?.(e.payload.done, e.payload.total, e.payload.item);
-      }
-    });
-    const unD = listen<JobDone<T>>("job-done", (e) => {
-      if (e.payload.job !== job) return;
-      unP.then((u) => u());
-      unD.then((u) => u());
-      if (e.payload.ok) resolve(e.payload.value as T);
-      else reject(new Error(e.payload.error ?? "job failed"));
-    });
+  // Listeners are registered before the job id arrives: the backend emits
+  // immediately, and `job-done` may even land before `await start` settles.
+  let jobId: string | null = null;
+  let settle: ((v: T) => void) | null = null;
+  let fail: ((e: Error) => void) | null = null;
+  const result = new Promise<T>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
   });
+  const unP = await listen<JobProgress>("job-progress", (e) => {
+    if (e.payload.job === jobId) {
+      onProgress?.(e.payload.done, e.payload.total, e.payload.item);
+    }
+  });
+  let finished = false;
+  const unD = await listen<JobDone<T>>("job-done", (e) => {
+    if (e.payload.job !== jobId || finished) return;
+    finished = true;
+    unP();
+    unD();
+    if (e.payload.ok) settle?.(e.payload.value as T);
+    else fail?.(new Error(e.payload.error ?? "job failed"));
+  });
+  try {
+    jobId = await start;
+  } catch (e) {
+    unP();
+    unD();
+    throw e;
+  }
+  return result;
 }
 
 export const pipelineDryRunStart = (steps: Processor[], scope: Scope) =>

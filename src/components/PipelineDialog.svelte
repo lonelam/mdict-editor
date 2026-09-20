@@ -56,7 +56,7 @@
   async function run(dry: boolean) {
     running = true;
     reports = null;
-    progress = null;
+    progress = { done: 0, total: 0, item: "启动中…" };
     try {
       const start = dry
         ? api.pipelineDryRunStart(buildSteps(), buildScope())
@@ -174,10 +174,10 @@
       {/if}
     </section>
 
-    {#if running && progress}
+    {#if running}
       <div class="job-progress">
-        <div class="bar"><div class="fill" style:width={`${progress.total ? (progress.done / progress.total) * 100 : 0}%`}></div></div>
-        <span>{progress.done}/{progress.total} · {progress.item}</span>
+        <div class="bar"><div class="fill" style:width={`${progress && progress.total ? (progress.done / progress.total) * 100 : 0}%`}></div></div>
+        <span>{progress ? `${progress.done}/${progress.total} · ${progress.item}` : "准备中…"}</span>
         <button class="cancel" onclick={() => job && api.cancelJob(job)}>取消</button>
       </div>
     {/if}

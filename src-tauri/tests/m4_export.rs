@@ -12,7 +12,7 @@ fn setup() -> (tempfile::TempDir, AppState) {
     let (mdx, mdd, ext_css, ext_js) = fixtures::write_all(dir.path());
     let mut state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in [&mdx, &mdd, &ext_css, &ext_js] {
             pool.sources.push(SourcePool::open_path(p).unwrap());
         }
@@ -31,12 +31,12 @@ fn export_edited_mdx_and_reopen() {
     let hello = ResourceId::Mdx { source: 0, ordinal: 2 };
     let banana = ResourceId::Mdx { source: 0, ordinal: 1 };
     let mut overlay = Overlay::default();
-    let original = state.pool.lock().unwrap().read_original(&hello).unwrap();
+    let original = state.pool.read().unwrap().read_original(&hello).unwrap();
     overlay.write(hello.clone(), original, b"<p>edited hello</p>".to_vec());
     overlay.delete(banana.clone(), vec![]);
 
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -77,13 +77,13 @@ fn export_edited_mdd_with_externals_embedded() {
     let mut overlay = Overlay::default();
     overlay.write(
         app_js.clone(),
-        state.pool.lock().unwrap().read_original(&app_js).unwrap(),
+        state.pool.read().unwrap().read_original(&app_js).unwrap(),
         b"console.log(\"minified\")".to_vec(),
     );
     overlay.delete(blob.clone(), vec![]);
 
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -115,7 +115,7 @@ fn export_embed_rebuilds_even_without_edits() {
     // Embedding forces an MDD rebuild even when nothing was edited: the
     // externals must land in the output.
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -141,14 +141,14 @@ fn export_externals_only_makes_standalone_mdd() {
     // Only the externals are loaded.
     let mut state = AppState::default();
     {
-        let mut pool = state.pool.lock().unwrap();
+        let mut pool = state.pool.write().unwrap();
         for p in [&ext_css, &ext_js] {
             pool.sources.push(SourcePool::open_path(p).unwrap());
         }
     }
     let out = tempfile::tempdir().unwrap();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -172,7 +172,7 @@ fn export_save_externals_writes_files() {
     let (_dir, state) = setup();
     let out = tempfile::tempdir().unwrap();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -191,7 +191,7 @@ fn export_without_edits_reports_skip() {
     let (_dir, state) = setup();
     let out = tempfile::tempdir().unwrap();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -213,7 +213,7 @@ fn export_lossy_dual_output_and_overlay_untouched() {
     let out = tempfile::tempdir().unwrap();
 
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -237,7 +237,7 @@ fn export_lossy_dual_output_and_overlay_untouched() {
     assert!(!report.files.iter().any(|f| f.path.ends_with("assets.edited.mdd")));
 
     // The overlay must not have received lossy bytes.
-    assert!(state.overlay.lock().unwrap().revisions.is_empty());
+    assert!(state.overlay.read().unwrap().revisions.is_empty());
 
     // PNG resources became JPEG inside the lossy copy.
     let reopened = mdictlib::MddFile::open(&lossy.path).unwrap();
@@ -273,14 +273,14 @@ fn export_lossy_preserves_transparent_images() {
     let mut state = AppState::default();
     state
         .pool
-        .lock()
+        .write()
         .unwrap()
         .sources
         .push(SourcePool::open_path(mdd_path.to_str().unwrap()).unwrap());
 
     let out = tempfile::tempdir().unwrap();
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
@@ -318,12 +318,12 @@ fn export_edited_and_lossy_coexist() {
     let mut overlay = Overlay::default();
     overlay.write(
         app_js.clone(),
-        state.pool.lock().unwrap().read_original(&app_js).unwrap(),
+        state.pool.read().unwrap().read_original(&app_js).unwrap(),
         b"console.log(\"edited\")".to_vec(),
     );
 
     let report = export_build(
-        &state.pool.lock().unwrap(),
+        &state.pool.read().unwrap(),
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),

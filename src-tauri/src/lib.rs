@@ -43,10 +43,22 @@ where
     let id_done = id.clone();
     let app_cleanup = app.clone();
     let id_cleanup = id.clone();
+    // Progress events are throttled to ~12/s: a 793MB export walks tens of
+    // thousands of resources and an event per item floods the webview.
+    let last_emit_ms = std::sync::Mutex::new(0u128);
+    let clock = std::time::Instant::now();
     std::thread::spawn(move || {
         let state = app_progress.state::<AppState>();
         let ctl = JobCtl {
             progress: &|done, total, item| {
+                let now = clock.elapsed().as_millis();
+                {
+                    let mut last = last_emit_ms.lock().expect("throttle");
+                    if now - *last < 80 && done < total {
+                        return;
+                    }
+                    *last = now;
+                }
                 let _ = app_progress.emit(
                     "job-progress",
                     serde_json::json!({"job": id_progress, "done": done, "total": total, "item": item}),
@@ -113,8 +125,8 @@ fn with_registry<T>(
     state: &AppState,
     f: impl FnOnce(&SourcePool, &Registry) -> Result<T, String>,
 ) -> Result<T, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     registry::ensure_built(&pool, &mut registry)?;
     f(&pool, &registry)
 }
@@ -133,8 +145,8 @@ struct OpenResult {
 /// Same-path re-opens are skipped; per-file errors do not abort the batch.
 #[tauri::command]
 fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<OpenResult, String> {
-    let mut pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let mut pool = state.pool.write().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     let mut result = OpenResult {
         added: Vec::new(),
         skipped: Vec::new(),
@@ -168,8 +180,8 @@ fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ope
 /// into the removed source are dropped.
 #[tauri::command]
 fn remove_source(id: u32, state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let mut pool = state.pool.write().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     pool.remove(id as usize)?;
     overlay.revisions.retain(|k, _| k.source_index() != id);
     Ok(true)
@@ -180,9 +192,9 @@ fn resource_stats(
     source: Option<u32>,
     state: tauri::State<AppState>,
 ) -> Result<Vec<registry::CategoryStat>, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     registry::ensure_built(&pool, &mut registry)?;
     registry::stats(&pool, &overlay, &registry, source)
 }
@@ -203,9 +215,9 @@ fn list_resources(
                 .map_err(|e| e.to_string())?,
         ),
     };
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     registry::ensure_built(&pool, &mut registry)?;
     registry::list_resources(
         &pool,
@@ -223,9 +235,9 @@ fn list_resources(
 
 #[tauri::command]
 fn resource_meta(id: ResourceId, state: tauri::State<AppState>) -> Result<ResourceMeta, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     registry::ensure_built(&pool, &mut registry)?;
     let key = pool.key_of(&id)?;
     let entry = pool.get(&id)?;
@@ -310,8 +322,8 @@ fn read_resource(
     id: ResourceId,
     state: tauri::State<AppState>,
 ) -> Result<ResourceContent, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
     read_content(&pool, &overlay, &id)
 }
 
@@ -321,8 +333,8 @@ fn write_resource(
     bytes: Vec<u8>,
     state: tauri::State<AppState>,
 ) -> Result<RevisionInfo, String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     let original = match overlay.get(&id) {
         Some(rev) => rev.original.clone(),
         None => pool.read_original(&id)?,
@@ -338,27 +350,100 @@ fn write_resource(
 
 #[tauri::command]
 fn undo_resource(id: ResourceId, state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     Ok(overlay.undo(&id))
 }
 
 /// Removes the whole edit chain; the resource returns to source content.
 #[tauri::command]
 fn revert_resource(id: ResourceId, state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     Ok(overlay.revert(&id))
 }
 
 #[tauri::command]
 fn delete_resource(id: ResourceId, state: tauri::State<AppState>) -> Result<(), String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     let original = match overlay.get(&id) {
         Some(rev) => rev.original.clone(),
         None => pool.read_original(&id)?,
     };
     overlay.delete(id, original);
     Ok(())
+}
+
+/// Real dictionary entries rarely link their companion CSS — reader apps
+/// load it globally. The preview reproduces that by injecting `<link>` tags
+/// for every loaded CSS (external files first, then MDD css resources) into
+/// MDX entry HTML, skipping stylesheets the entry already references.
+fn inject_preview_css(pool: &SourcePool, registry: &Registry, html: &[u8]) -> Vec<u8> {
+    let text = match std::str::from_utf8(html) {
+        Ok(t) => t,
+        Err(_) => return html.to_vec(),
+    };
+    let mut links: Vec<String> = Vec::new();
+    for (idx, entry) in pool.sources.iter().enumerate() {
+        if entry.tombstone {
+            continue;
+        }
+        match &entry.source {
+            crate::state::Source::External { path, .. } => {
+                let is_css = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("css"));
+                if is_css {
+                    if let Ok(name) = pool.key_of(&ResourceId::Ext { file: idx as u32 }) {
+                        links.push(name);
+                    }
+                }
+            }
+            crate::state::Source::Mdd(file) => {
+                // Original-case hrefs: one representative key per css name.
+                if let Some(Some(_)) = registry.indices.get(idx) {
+                    for key in file.keys().flatten() {
+                        if key.key().to_lowercase().ends_with(".css") {
+                            links.push(key.key().to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    links.sort();
+    links.dedup();
+    let tags: Vec<String> = links
+        .into_iter()
+        .filter(|name| {
+            let encoded = name.replace(' ', "%20");
+            !text.contains(&encoded) && !text.contains(name.as_str())
+        })
+        .map(|name| {
+            let encoded = name.replace(' ', "%20");
+            format!("<link rel=\"stylesheet\" href=\"{}\">", encoded)
+        })
+        .collect();
+    if tags.is_empty() {
+        return html.to_vec();
+    }
+    let injection = tags.join("
+");
+    let lower = text.to_lowercase();
+    let patched = if let Some(pos) = lower.find("</head>") {
+        let cut = pos + "</head>".len().min(text.len());
+        format!("{}
+{}{}", &text[..cut.min(text.len())], injection, &text[cut.min(text.len())..])
+    } else if let Some(pos) = lower.find("<body") {
+        let insert_at = text[pos..].find('>').map(|o| pos + o + 1).unwrap_or(pos);
+        format!("{}{}
+{}", &text[..insert_at], injection, &text[insert_at..])
+    } else {
+        format!("{}
+{}", injection, text)
+    };
+    patched.into_bytes()
 }
 
 /// Resolves a reference found inside `context` (Ctrl+Click jump support).
@@ -423,31 +508,44 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
         _ => return not_found("bad preview token"),
     };
 
-    let pool = match state.pool.lock() {
+    let pool = match state.pool.read() {
         Ok(p) => p,
         Err(_) => return not_found("state poisoned"),
     };
-    let overlay = match state.overlay.lock() {
+    let overlay = match state.overlay.read() {
         Ok(o) => o,
         Err(_) => return not_found("state poisoned"),
     };
+    // Index building needs a short write lock; drop to a read lock right
+    // after so preview requests never hold writers (or wait on them).
+    {
+        let mut registry = match state.registry.write() {
+            Ok(r) => r,
+            Err(_) => return not_found("state poisoned"),
+        };
+        if registry::ensure_built(&pool, &mut registry).is_err() {
+            return not_found("registry build failed");
+        }
+    }
+    let registry = match state.registry.read() {
+        Ok(r) => r,
+        Err(_) => return not_found("state poisoned"),
+    };
 
-    // Empty rel = the context resource itself (MDX entry HTML preview).
+    // Empty rel = the context resource itself (MDX entry HTML preview),
+    // with companion CSS auto-injected so the preview looks like a reader.
     if rel.is_empty() {
         let bytes = match state::current_bytes(&pool, &overlay, &ctx) {
             Ok(b) => b,
             Err(e) => return not_found(&e),
         };
+        if matches!(ctx, ResourceId::Mdx { .. }) {
+            let bytes = inject_preview_css(&pool, &registry, &bytes);
+            return ok("text/html; charset=utf-8", bytes);
+        }
         return ok("text/html; charset=utf-8", bytes);
     }
 
-    let mut registry = match state.registry.lock() {
-        Ok(r) => r,
-        Err(_) => return not_found("state poisoned"),
-    };
-    if registry::ensure_built(&pool, &mut registry).is_err() {
-        return not_found("registry build failed");
-    }
     match resolver::resolve_path(&pool, &registry, rel, Some(&ctx)) {
         Ok(resolver::ResolveOutcome::Found { target, .. }) => {
             match state::current_bytes(&pool, &overlay, &target) {
@@ -462,6 +560,26 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
     }
 }
 
+/// Active sources (tombstoned excluded) — lets the frontend rehydrate its
+/// list after an HMR refresh while the backend keeps its state.
+#[tauri::command]
+fn list_sources(state: tauri::State<AppState>) -> Result<Vec<SourceInfo>, String> {
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    Ok(pool
+        .sources
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.tombstone)
+        .map(|(id, e)| SourceInfo {
+            id: id as u32,
+            kind: e.kind(),
+            name: e.name.clone(),
+            title: e.title.clone(),
+            entry_count: e.entry_count(),
+        })
+        .collect())
+}
+
 /// Starts a dry-run job; progress/done arrive via events. Returns job id.
 #[tauri::command]
 fn pipeline_dry_run_start(
@@ -470,11 +588,19 @@ fn pipeline_dry_run_start(
     app: AppHandle,
 ) -> String {
     start_job(&app, "pipeline-dry", move |st, ctl| {
-        let pool = st.pool.lock().map_err(|e| e.to_string())?;
-        let overlay = st.overlay.lock().map_err(|e| e.to_string())?;
-        let mut registry = st.registry.lock().map_err(|e| e.to_string())?;
-        registry::ensure_built(&pool, &mut registry)?;
-        pipeline::dry_run(&pool, &overlay, &registry, &steps, &scope, ctl)
+        // Snapshot phase (short-lived locks): build indices + select targets,
+        // then drop the registry lock before the long walk so the preview
+        // protocol and UI reads never wait on us.
+        let metas = {
+            let pool = st.pool.read().map_err(|e| e.to_string())?;
+            let overlay = st.overlay.read().map_err(|e| e.to_string())?;
+            let mut registry = st.registry.write().map_err(|e| e.to_string())?;
+            registry::ensure_built(&pool, &mut registry)?;
+            pipeline::select_targets(&pool, &overlay, &registry, &scope)?
+        };
+        let pool = st.pool.read().map_err(|e| e.to_string())?;
+        let overlay = st.overlay.read().map_err(|e| e.to_string())?;
+        pipeline::dry_run_selected(&pool, &overlay, &steps, metas, ctl)
     })
 }
 
@@ -486,11 +612,24 @@ fn pipeline_apply_start(
     app: AppHandle,
 ) -> String {
     start_job(&app, "pipeline-apply", move |st, ctl| {
-        let pool = st.pool.lock().map_err(|e| e.to_string())?;
-        let mut overlay = st.overlay.lock().map_err(|e| e.to_string())?;
-        let mut registry = st.registry.lock().map_err(|e| e.to_string())?;
-        registry::ensure_built(&pool, &mut registry)?;
-        pipeline::apply(&pool, &mut overlay, &registry, &steps, &scope, ctl)
+        let metas = {
+            let pool = st.pool.read().map_err(|e| e.to_string())?;
+            let overlay = st.overlay.read().map_err(|e| e.to_string())?;
+            let mut registry = st.registry.write().map_err(|e| e.to_string())?;
+            registry::ensure_built(&pool, &mut registry)?;
+            pipeline::select_targets(&pool, &overlay, &registry, &scope)?
+        };
+        let (reports, applied) = {
+            let pool = st.pool.read().map_err(|e| e.to_string())?;
+            let overlay = st.overlay.read().map_err(|e| e.to_string())?;
+            pipeline::apply_selected(&pool, &overlay, &steps, metas, ctl)?
+        };
+        {
+            let pool = st.pool.read().map_err(|e| e.to_string())?;
+            let mut overlay = st.overlay.write().map_err(|e| e.to_string())?;
+            pipeline::commit_applied(&pool, &mut overlay, applied)?;
+        }
+        Ok(reports)
     })
 }
 
@@ -498,8 +637,8 @@ fn pipeline_apply_start(
 #[tauri::command]
 fn export_start(config: export::ExportConfig, app: AppHandle) -> String {
     start_job(&app, "export", move |st, ctl| {
-        let pool = st.pool.lock().map_err(|e| e.to_string())?;
-        let overlay = st.overlay.lock().map_err(|e| e.to_string())?;
+        let pool = st.pool.read().map_err(|e| e.to_string())?;
+        let overlay = st.overlay.read().map_err(|e| e.to_string())?;
         export::export_build(&pool, &overlay, &config, ctl)
     })
 }
@@ -538,9 +677,9 @@ fn insert_entry(
     if key.is_empty() {
         return Err("词条词头不能为空".into());
     }
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     let entry = pool.get(&ResourceId::Mdx {
         source,
         ordinal: 0,
@@ -580,9 +719,9 @@ fn insert_resources(
     paths: Vec<String>,
     state: tauri::State<AppState>,
 ) -> Result<(usize, Vec<String>), String> {
-    let pool = state.pool.lock().map_err(|e| e.to_string())?;
-    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     let entry = pool.get(&ResourceId::Mdd {
         source,
         ordinal: 0,
@@ -640,7 +779,7 @@ fn list_insertions(
     source: Option<u32>,
     state: tauri::State<AppState>,
 ) -> Result<Vec<InsertionInfo>, String> {
-    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
     Ok(overlay
         .insertions
         .iter()
@@ -664,7 +803,7 @@ fn update_insertion(
     html: String,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     let ins = overlay
         .insertions
         .get_mut(index)
@@ -679,7 +818,7 @@ fn update_insertion(
 /// Removes a pending insertion (swap-remove; UI refreshes indices after).
 #[tauri::command]
 fn remove_insertion(index: usize, state: tauri::State<AppState>) -> Result<bool, String> {
-    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     if index >= overlay.insertions.len() {
         return Err(format!("插入项 {index} 不存在"));
     }
@@ -720,6 +859,7 @@ pub fn run() {
             delete_resource,
             resolve_reference,
             remove_source,
+            list_sources,
             pipeline_dry_run_start,
             pipeline_apply_start,
             export_start,

@@ -40,8 +40,8 @@
   }
 
   onMount(() => {
-    // Expose for tests / console: open files programmatically.
     (window as unknown as { __store: typeof store }).__store = store;
+    void store.init();
   });
 </script>
 
