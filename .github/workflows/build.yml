@@ -18,8 +18,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon only: audiopus_sys's autotools build does not
+          # cross-compile for the universal x86_64 half (links the host
+          # arm64 lib), and Intel Macs are long EOL.
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            args: ""
           - platform: ubuntu-22.04
             args: ""
           - platform: windows-latest
@@ -34,10 +37,6 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Add macOS Rust targets (universal binary)
-        if: runner.os == 'MacOS'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       # audiopus_sys builds vendored libopus with autotools (autogen +
       # configure + make), absent from the default macOS image.
