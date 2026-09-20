@@ -35,7 +35,7 @@
 
 ## 与 AALookup 的关系（同构）
 
-本编辑器与 [AALookup](https://github.com/lonelam/aalookup) 词典阅读器**同源同构**：
+本编辑器与 [AALookup](https://aalookup.com) 词典阅读器**同源同构**：
 
 - **同一解析核心**：两者都构建在开源 Rust 庐 [mdictlib](https://crates.io/crates/mdictlib) 之上——同一套 MDX/MDD 解析、定位与块解码逻辑；
 - **同一资源解析顺序**：词条内资源引用按与 AALookup 阅读器一致的顺序解析（词典目录旁的松散文件优先，其次 MDD 内资源，键大小写与分隔符归一化，唯一后缀回退），编辑预览即阅读效果；

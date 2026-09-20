@@ -16,7 +16,7 @@
       <p class="sub">文本类资源支持 Ctrl+点击 跳转引用（如 <code>src="/img/logo.png"</code>）</p>
       <p class="sub">
         编辑结果可与 <a
-          href="https://github.com/lonelam/aalookup"
+          href="https://aalookup.com"
           target="_blank"
           rel="noreferrer">AALookup</a> 无缝衔接——同源同构的词典阅读器，
         导出后一键导入即可用阅读视角检验编辑效果。
