@@ -31,7 +31,7 @@
 
 ## 下载
 
-打 `v*` 标签或手动触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建三端安装包并自动发布到 GitHub Releases：Windows（NSIS/MSI）、macOS（Universal DMG，Apple Silicon + Intel）、Linux（AppImage/deb）。
+打 `v*` 标签或手动触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建三端安装包并自动发布到 GitHub Releases：Windows（NSIS/MSI）、macOS（Apple Silicon DMG）、Linux（AppImage/deb）。
 
 ## 与 AALookup 的关系（同构）
 

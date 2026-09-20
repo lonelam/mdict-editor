@@ -2,7 +2,7 @@ name: build
 
 # 3-platform client builds (Windows / macOS / Linux).
 # - push a `v*` tag → builds all platforms and publishes a GitHub Release
-#   with the installers (NSIS/MSI, universal DMG, AppImage/deb)
+#   with the installers (NSIS/MSI, Apple Silicon DMG, AppImage/deb)
 # - manual dispatch → artifacts on the workflow run
 #
 # mdictlib comes from crates.io; no sibling checkout is needed.
