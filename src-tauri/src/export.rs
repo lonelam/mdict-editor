@@ -345,7 +345,13 @@ fn rebuild_mdd_source(
             file.len()
         ));
     }
-    if let Some((name, bytes)) = externals.first() {
+    // Spot-check only externals that were actually embedded; skipped ones
+    // (key collision with an existing MDD resource) are absent by design.
+    let embedded_externals: Vec<&(String, Vec<u8>)> = externals
+        .iter()
+        .filter(|(name, _)| !skipped.iter().any(|s| s == name))
+        .collect();
+    if let Some((name, bytes)) = embedded_externals.first() {
         match reopened.lookup(name) {
             Ok(Some(res)) if res.bytes() == bytes.as_slice() => {}
             Ok(_) => {

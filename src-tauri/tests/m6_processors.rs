@@ -71,3 +71,36 @@ fn css_purge_empty_corpus_keeps_everything() {
         .unwrap();
     assert!(String::from_utf8(out).unwrap().contains("never-appears"));
 }
+
+#[test]
+fn audio_opus_wav_to_ogg_opus() {
+    // 0.4 s 440 Hz mono wav via the fixture helper logic (inline here).
+    const RATE: u32 = 22050;
+    let samples = RATE * 2 / 5;
+    let mut wav: Vec<u8> = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    let data_len = samples * 2;
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for i in 0..samples {
+        let t = i as f32 / RATE as f32;
+        let v = (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+        wav.extend_from_slice(&((v * 12000.0) as i16).to_le_bytes());
+    }
+
+    let out = Processor::AudioOpus { bitrate_kbps: Some(24) }
+        .process("hello.wav", &wav, &HashSet::new())
+        .unwrap();
+    assert_eq!(&out[..4], b"OggS", "ogg magic");
+    assert!(out.windows(8).any(|w| w == b"OpusHead"), "opus head present");
+    assert!(out.len() < wav.len() / 3, "opus {} vs wav {}", out.len(), wav.len());
+}

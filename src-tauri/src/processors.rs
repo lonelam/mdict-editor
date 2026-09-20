@@ -45,6 +45,14 @@ pub enum Processor {
     /// Drops CSS rules whose class/id selectors never appear in the entry
     /// corpus (collected by the pipeline/export job into JobCtl).
     CssPurge,
+    /// Pronunciation audio -> Opus-in-Ogg (libopus Voip @ 16 kHz mono).
+    /// 5-10x smaller than WAV/MP3 at near-transparent speech quality; old
+    /// MDict players may not sniff it — opt-in.
+    AudioOpus {
+        /// 8-64 kbps. Default 24.
+        #[serde(default)]
+        bitrate_kbps: Option<u32>,
+    },
 }
 
 impl Processor {
@@ -59,6 +67,7 @@ impl Processor {
             Processor::ImgWebp { .. } => "img-webp",
             Processor::PngQuantize { .. } => "png-quantize",
             Processor::CssPurge => "css-purge",
+            Processor::AudioOpus { .. } => "audio-opus",
         }
     }
 
@@ -66,6 +75,7 @@ impl Processor {
         match self {
             Processor::MinifyJs => category == Category::Js,
             Processor::MinifyCss | Processor::CssPurge => category == Category::Css,
+            Processor::AudioOpus { .. } => category == Category::Audio,
             Processor::MinifyHtml => matches!(category, Category::Html | Category::Entry),
             Processor::PngOptimize { .. } => category == Category::Image,
             Processor::ImgConvert { .. }
@@ -100,6 +110,7 @@ impl Processor {
             Processor::ImgWebp { quality } => img_webp(input, *quality),
             Processor::PngQuantize { colors } => png_quantize(input, *colors),
             Processor::CssPurge => css_purge(input, used_selectors),
+            Processor::AudioOpus { bitrate_kbps } => audio_opus(input, *bitrate_kbps),
         }
     }
 }
@@ -453,4 +464,157 @@ fn img_resize(key: &str, input: &[u8], width: Option<u32>, height: Option<u32>) 
         }
     }
     Ok(out)
+}
+
+
+/// Opus-in-Ogg encode for pronunciation audio: decode any supported input
+/// (wav/mp3/ogg/flac via symphonia), downmix to mono, linear-resample to
+/// 16 kHz (speech band), encode with libopus Voip, wrap in an Ogg stream.
+/// Keys keep their original extension — browsers sniff content.
+fn audio_opus(input: &[u8], bitrate_kbps: Option<u32>) -> Result<Vec<u8>, String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    // ---- decode to interleaved f32 ----
+    let src = std::io::Cursor::new(input.to_vec());
+    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+    let probed = symphonia::default::get_probe()
+        .format(&Hint::new(), mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("decode: {e}"))?;
+    let mut format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or("no audio track")?
+        .clone();
+    let sample_rate = track.codec_params.sample_rate.ok_or("no sample rate")? as usize;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|c| c.count())
+        .unwrap_or(1);
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("decoder: {e}"))?;
+
+    let mut mono: Vec<f32> = Vec::new();
+    let mut buf: Option<SampleBuffer<f32>> = None;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+            Err(e) => return Err(format!("decode: {e}")),
+        };
+        let frames = decoded.frames();
+        let spec = *decoded.spec();
+        if buf.is_none() {
+            buf = Some(SampleBuffer::<f32>::new(
+                decoded.capacity() as u64,
+                decoded.spec().clone(),
+            ));
+        }
+        let buffer = buf.as_mut().unwrap();
+        buffer.copy_interleaved_ref(decoded);
+        let interleaved = buffer.samples();
+        // Downmix to mono.
+        for frame in interleaved.chunks(spec.channels.count()) {
+            let sum: f32 = frame.iter().sum();
+            mono.push(sum / frame.len() as f32);
+        }
+        let _ = frames;
+    }
+    if mono.is_empty() {
+        return Err("empty audio".into());
+    }
+    let _ = channels;
+
+    // ---- linear resample to 16 kHz ----
+    const TARGET_RATE: usize = 16_000;
+    let out_len = (mono.len() as f64 * TARGET_RATE as f64 / sample_rate as f64) as usize;
+    let mut pcm: Vec<f32> = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * sample_rate as f64 / TARGET_RATE as f64;
+        let i0 = pos.floor() as usize;
+        let i1 = (i0 + 1).min(mono.len() - 1);
+        let frac = (pos - i0 as f64) as f32;
+        pcm.push(mono[i0] * (1.0 - frac) + mono[i1] * frac);
+    }
+    let pcm_i16: Vec<i16> = pcm
+        .iter()
+        .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect();
+
+    // ---- libopus encode (20 ms frames = 320 samples @ 16 kHz) ----
+    use audiopus::{coder::Encoder, Application, Bitrate, Channels, Error as OpusError, SampleRate};
+    let mut encoder =
+        Encoder::new(SampleRate::Hz16000, Channels::Mono, Application::Voip)
+            .map_err(|e| format!("opus: {e}"))?;
+    encoder
+        .set_bitrate(Bitrate::BitsPerSecond(
+            (bitrate_kbps.unwrap_or(24).clamp(8, 64) * 1000) as i32,
+        ))
+        .map_err(|e| format!("opus bitrate: {e}"))?;
+
+    const FRAME: usize = 320;
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    let mut cursor = 0;
+    while cursor < pcm_i16.len() {
+        let end = (cursor + FRAME).min(pcm_i16.len());
+        let mut frame: Vec<i16> = pcm_i16[cursor..end].to_vec();
+        frame.resize(FRAME, 0); // pad final frame
+        let mut out = [0u8; 4000];
+        match encoder.encode(&frame, &mut out) {
+            Ok(n) => packets.push(out[..n].to_vec()),
+            Err(OpusError::EmptyPacket) => {}
+            Err(e) => return Err(format!("opus encode: {e}")),
+        }
+        cursor = end;
+    }
+
+    // ---- Ogg encapsulation (OpusHead + OpusTags + packets) ----
+    use ogg::{Packet as OggPacket, PacketWriteEndInfo, PacketWriter};
+    let mut writer = PacketWriter::new(Vec::new());
+    let mut head = Vec::new();
+    head.extend_from_slice(b"OpusHead");
+    head.push(1); // version
+    head.push(1); // mono
+    head.extend_from_slice(&312u16.to_le_bytes()); // pre-skip
+    head.extend_from_slice(&(sample_rate as u32).to_le_bytes()); // input rate
+    head.extend_from_slice(&0i16.to_le_bytes()); // gain
+    head.push(0); // mapping family
+    let serial: u32 = 0x6D64_6963; // "mdic"
+    writer
+        .write_packet(head, serial, PacketWriteEndInfo::EndPage, 0)
+        .map_err(|e| format!("ogg: {e}"))?;
+    let mut tags = Vec::new();
+    tags.extend_from_slice(b"OpusTags");
+    tags.extend_from_slice(&0u32.to_le_bytes()); // vendor
+    tags.extend_from_slice(&0u32.to_le_bytes()); // comments
+    writer
+        .write_packet(tags, serial, PacketWriteEndInfo::NormalPacket, 0)
+        .map_err(|e| format!("ogg: {e}"))?;
+    let last = packets.len().saturating_sub(1);
+    let mut absgp: u64 = 0;
+    for (i, p) in packets.iter().enumerate() {
+        let end = if i == last {
+            PacketWriteEndInfo::EndStream
+        } else {
+            PacketWriteEndInfo::NormalPacket
+        };
+        // 20 ms per packet at 48 kHz granule position.
+        absgp += 960;
+        writer
+            .write_packet(p.as_slice(), serial, end, absgp)
+            .map_err(|e| format!("ogg: {e}"))?;
+    }
+    Ok(writer.into_inner())
 }

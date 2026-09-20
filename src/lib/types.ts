@@ -66,7 +66,8 @@ export type Processor =
   | { kind: "img-resize"; width?: number | null; height?: number | null }
   | { kind: "img-webp"; quality?: number | null }
   | { kind: "png-quantize"; colors?: number | null }
-  | { kind: "css-purge" };
+  | { kind: "css-purge" }
+  | { kind: "audio-opus"; bitrateKbps?: number | null };
 
 export interface Scope {
   all?: boolean;

@@ -62,6 +62,7 @@
               { kind: "css-purge" },
               { kind: "minify-css" },
               { kind: "minify-js" },
+              { kind: "audio-opus", bitrateKbps: 24 },
             ]
           : null,
       });
@@ -133,8 +134,8 @@
       </label>
       <p class="note">
         有损副本独立于原始版本：原始产物照常导出，改写层与源文件不受影响。
-        当前链：图片转有损 WebP（保透明）+ PNG 调色板量化 + CSS 死规则清除 +
-        CSS/JS 压缩；Opus 音频 / 字体子集化将随后续版本接入。
+        当前链：图片转有损 WebP（保透明）+ PNG 调色板量化 + 发音音频转 Opus 24kbps +
+        CSS 死规则清除 + CSS/JS 压缩；字体子集化将随后续版本接入。
       </p>
     </section>
 

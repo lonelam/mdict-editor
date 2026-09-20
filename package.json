@@ -1,6 +1,6 @@
 {
   "name": "mdict-editor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Visual reader and editor for MDict .mdx/.mdd resources",
   "type": "module",
   "scripts": {

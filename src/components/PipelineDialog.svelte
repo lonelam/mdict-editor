@@ -22,6 +22,7 @@
   let webpQuality = $state(75);
   let doQuantize = $state(false);
   let doPurge = $state(false);
+  let doOpus = $state(false);
 
   let running = $state(false);
   let reports = $state<StepReport[] | null>(null);
@@ -37,6 +38,7 @@
     if (doQuantize) steps.push({ kind: "png-quantize", colors: 256 });
     if (doWebp) steps.push({ kind: "img-webp", quality: webpQuality });
     if (doPurge) steps.push({ kind: "css-purge" });
+    if (doOpus) steps.push({ kind: "audio-opus", bitrateKbps: 24 });
     return steps;
   }
 
@@ -54,7 +56,7 @@
   }
 
   const canRun = $derived(
-    (doCss || doJs || doHtml || doPng || doWebp || doQuantize || doPurge) &&
+    (doCss || doJs || doHtml || doPng || doWebp || doQuantize || doPurge || doOpus) &&
       (scopeMode !== "selection" || store.selection.length > 0) &&
       (scopeMode !== "source" || scopeSource !== null) &&
       (scopeMode !== "category" || scopeCategory !== null)
@@ -159,6 +161,10 @@
         {/if}
         <label><input type="checkbox" bind:checked={doQuantize} /> PNG 调色板量化（256 色）</label>
         <label><input type="checkbox" bind:checked={doPurge} /> CSS 死规则清除（按词条语料）</label>
+        <label>
+          <input type="checkbox" bind:checked={doOpus} />
+          发音音频转 Opus 24kbps（WAV/MP3 → Ogg/Opus，约 5-10×；注意旧播放器兼容性）
+        </label>
       </div>
       <p class="note">处理器自动跳过不适用的资源；结果写入改写层，可随时还原。</p>
     </section>
