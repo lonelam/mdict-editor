@@ -45,7 +45,11 @@
         progress = { done, total, item };
       });
       const ok = report.files.filter((f) => f.checkOk).length;
-      store.toast(report.ok ? "ok" : "info", `导出完成：${ok}/${report.files.length} 项校验通过`);
+      if (report.files.length === 0) {
+        store.toast("info", "没有需要导出的内容：无编辑，且未勾选有损副本/外部嵌入");
+      } else {
+        store.toast(report.ok ? "ok" : "info", `导出完成：${ok}/${report.files.length} 项校验通过`);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       store.toast(msg === "已取消" ? "info" : "error", msg);

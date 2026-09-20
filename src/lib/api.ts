@@ -58,6 +58,14 @@ export async function runJob<T>(
     settle = resolve;
     fail = reject;
   });
+  // A no-op export can finish before `await start` delivers the job id, so
+  // early done events are parked and replayed once the id is known.
+  let earlyDone: JobDone<T> | null = null as JobDone<T> | null;
+  const finish = (p: JobDone<T>, un: () => void) => {
+    un();
+    if (p.ok) settle?.(p.value as T);
+    else fail?.(new Error(p.error ?? "job failed"));
+  };
   const unP = await listen<JobProgress>("job-progress", (e) => {
     if (e.payload.job === jobId) {
       onProgress?.(e.payload.done, e.payload.total, e.payload.item);
@@ -65,12 +73,17 @@ export async function runJob<T>(
   });
   let finished = false;
   const unD = await listen<JobDone<T>>("job-done", (e) => {
-    if (e.payload.job !== jobId || finished) return;
+    if (finished) return;
+    if (jobId === null) {
+      earlyDone = e.payload; // id not yet known — park it
+      return;
+    }
+    if (e.payload.job !== jobId) return;
     finished = true;
-    unP();
-    unD();
-    if (e.payload.ok) settle?.(e.payload.value as T);
-    else fail?.(new Error(e.payload.error ?? "job failed"));
+    finish(e.payload, () => {
+      unP();
+      unD();
+    });
   });
   try {
     jobId = await start;
@@ -78,6 +91,14 @@ export async function runJob<T>(
     unP();
     unD();
     throw e;
+  }
+  const parked: JobDone<T> | null = earlyDone as JobDone<T> | null;
+  if (!finished && parked !== null && parked.job === jobId) {
+    finished = true;
+    finish(parked, () => {
+      unP();
+      unD();
+    });
   }
   return result;
 }

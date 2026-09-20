@@ -207,7 +207,13 @@ class AppStore {
       if (outcome.status === "found") {
         await this.openResource(outcome.target);
       } else if (outcome.status === "ambiguous") {
-        this.toast("error", `引用有歧义（${outcome.keys.length} 处匹配）: ${outcome.keys.join(", ")}`);
+        // Same name in several sources (e.g. shipped in the MDD and opened
+        // from disk): jump to the first hit and say so.
+        await this.openResource(outcome.candidates[0]);
+        this.toast(
+          "info",
+          `“${reference}” 有 ${outcome.keys.length} 处匹配，已打开第 1 处: ${outcome.keys[0]}`
+        );
       } else if (outcome.status === "externalRef") {
         this.toast("info", `外部链接，应用内不跳转: ${reference}`);
       } else {

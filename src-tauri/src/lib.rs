@@ -546,17 +546,25 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
         return ok("text/html; charset=utf-8", bytes);
     }
 
-    match resolver::resolve_path(&pool, &registry, rel, Some(&ctx)) {
-        Ok(resolver::ResolveOutcome::Found { target, .. }) => {
-            match state::current_bytes(&pool, &overlay, &target) {
-                Ok(bytes) => {
-                    let key = pool.key_of(&target).unwrap_or_default();
-                    ok(crate::category::Category::mime_for(&key), bytes)
-                }
-                Err(e) => not_found(&e),
-            }
+    // Preview resolution is best-effort: an ambiguous key (the same name in
+    // an MDD and as an external file — common when authors shipped the css
+    // both ways) serves the first hit instead of 404ing.
+    let resolved = match resolver::resolve_path(&pool, &registry, rel, Some(&ctx)) {
+        Ok(resolver::ResolveOutcome::Found { target, .. }) => Some(target),
+        Ok(resolver::ResolveOutcome::Ambiguous { candidates, .. }) => {
+            candidates.into_iter().next()
         }
-        _ => not_found("resource not found"),
+        _ => None,
+    };
+    match resolved {
+        Some(target) => match state::current_bytes(&pool, &overlay, &target) {
+            Ok(bytes) => {
+                let key = pool.key_of(&target).unwrap_or_default();
+                ok(crate::category::Category::mime_for(&key), bytes)
+            }
+            Err(e) => not_found(&e),
+        },
+        None => not_found("resource not found"),
     }
 }
 
