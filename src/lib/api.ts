@@ -25,6 +25,21 @@ export async function listSources(): Promise<SourceInfo[]> {
   return invoke("list_sources");
 }
 
+export interface SourceProps {
+  id: number;
+  kind: string;
+  name: string;
+  path: string;
+  fileSize: number;
+  title: string | null;
+  entryCount: number;
+  attributes: [string, string][];
+}
+
+export async function sourceProps(id: number): Promise<SourceProps> {
+  return invoke("source_props", { id });
+}
+
 // ---- long-running jobs (progress + cancel via events) ----
 
 interface JobProgress {
@@ -126,9 +141,9 @@ export interface InsertionInfo {
 export const insertEntry = (source: number, key: string, html: string) =>
   invoke<number>("insert_entry", { source, key, html });
 
-/** Returns [addedCount, perFileErrors]. */
-export const insertResources = (source: number, paths: string[]) =>
-  invoke<[number, string[]]>("insert_resources", { source, paths });
+/** Returns [addedCount, perFileErrors]. `pathPrefix` lands inside the MDD. */
+export const insertResources = (source: number, paths: string[], pathPrefix: string | null) =>
+  invoke<[number, string[]]>("insert_resources", { source, paths, pathPrefix });
 
 export const listInsertions = (source: number | null) =>
   invoke<InsertionInfo[]>("list_insertions", { source: source ?? null });

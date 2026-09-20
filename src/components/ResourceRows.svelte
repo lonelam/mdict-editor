@@ -4,7 +4,15 @@
   import { store } from "../lib/store.svelte";
   import { idKey, type Category, type ResourceMeta } from "../lib/types";
 
-  let { sourceId, category }: { sourceId: number; category: Category } = $props();
+  let {
+    sourceId,
+    category,
+    onrowmenu,
+  }: {
+    sourceId: number;
+    category: Category;
+    onrowmenu?: (e: MouseEvent, m: ResourceMeta) => void;
+  } = $props();
 
   let rows = $state<ResourceMeta[]>([]);
   let loading = $state(false);
@@ -54,7 +62,11 @@
         onclick={(e) => e.stopPropagation()}
         onchange={() => store.toggleSelection(idKey(m.id))}
       />
-      <button class="res-btn" onclick={() => store.openResource(m.id)}>
+      <button
+        class="res-btn"
+        onclick={() => store.openResource(m.id)}
+        oncontextmenu={(e) => onrowmenu?.(e, m)}
+      >
         <span class="key" title={m.key}>{m.key}</span>
         <span class="size">{m.sizeCurrent !== null ? `${m.sizeCurrent}B` : ""}</span>
       </button>

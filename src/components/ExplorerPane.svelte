@@ -1,10 +1,60 @@
 <script lang="ts">
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+  import ContextMenu from "./ContextMenu.svelte";
+  import SourcePropsDialog from "./SourcePropsDialog.svelte";
   import * as api from "../lib/api";
   import { store } from "../lib/store.svelte";
   import ResourceRows from "./ResourceRows.svelte";
   import type { InsertionInfo } from "../lib/api";
   import { idKey, type Category, type ResourceMeta } from "../lib/types";
+
+  // ---- context menus / props ----
+  let menu = $state<{
+    x: number;
+    y: number;
+    items: { label: string; danger?: boolean; disabled?: boolean; act: () => void }[];
+  } | null>(null);
+  let propsOf = $state<api.SourceProps | null>(null);
+
+  function openSourceMenu(e: MouseEvent, id: number) {
+    e.preventDefault();
+    menu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        {
+          label: "属性",
+          act: async () => {
+            try {
+              propsOf = await api.sourceProps(id);
+            } catch (err) {
+              store.toast("error", String(err));
+            }
+          },
+        },
+        {
+          label: "移除此文件（丢弃全部变更，不影响原文件）",
+          danger: true,
+          act: () => store.removeSource(id),
+        },
+      ],
+    };
+  }
+
+  function openRowMenu(e: MouseEvent, m: ResourceMeta) {
+    e.preventDefault();
+    const deleted = m.deleted;
+    menu = {
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        { label: "打开", act: () => store.openResource(m.id) },
+        deleted
+          ? { label: "还原（取消删除）", act: () => store.restoreResource(m.id) }
+          : { label: "标记删除（导出生效）", danger: true, act: () => store.markDeleted(m.id) },
+      ],
+    };
+  }
 
   // ---- insertions ----
   let insertions = $state<InsertionInfo[]>([]);
@@ -44,6 +94,9 @@
     }
   }
 
+  let insTarget = $state<number | null>(null);
+  let insPrefix = $state("");
+
   async function pickResourceFiles() {
     if (mddSources.length === 0) {
       store.toast("error", "请先打开一个 MDD 源");
@@ -51,9 +104,14 @@
     }
     const paths = await openFileDialog({ multiple: true });
     if (!paths) return;
+    const target = insTarget ?? mddSources[0].id;
     busy = true;
     try {
-      const [added, errors] = await api.insertResources(mddSources[0].id, paths as string[]);
+      const [added, errors] = await api.insertResources(
+        target,
+        paths as string[],
+        insPrefix.trim() || null
+      );
       if (added > 0) store.toast("ok", `已加入 ${added} 个资源（导出时写入）`);
       for (const e of errors) store.toast("error", e);
       await refreshInsertions();
@@ -155,6 +213,26 @@
     </form>
   {/if}
 
+  {#if showInsertForm}
+    {#if mddSources.length > 0}
+      <div class="insert-res">
+        <label>
+          导入资源到
+          <select bind:value={insTarget}>
+            {#each mddSources as s (s.id)}
+              <option value={s.id}>{s.name}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          路径前缀
+          <input bind:value={insPrefix} placeholder="如 img/custom（可空）" />
+        </label>
+        <button onclick={pickResourceFiles} disabled={busy}>选择文件并加入待插入…</button>
+      </div>
+    {/if}
+  {/if}
+
   {#if insertions.length > 0}
     <div class="insert-list">
       <div class="insert-head">待插入 · {insertions.length} 项（导出时写入）</div>
@@ -196,7 +274,11 @@
             onclick={(e) => e.stopPropagation()}
             onchange={() => store.toggleSelection(idKey(m.id))}
           />
-          <button class="res-btn" onclick={() => store.openResource(m.id)}>
+          <button
+            class="res-btn"
+            onclick={() => store.openResource(m.id)}
+            oncontextmenu={(e) => openRowMenu(e, m)}
+          >
             <span class="key">{m.key}</span>
             <span class="src">{m.sourceName}</span>
           </button>
@@ -208,7 +290,11 @@
     <div class="tree">
       {#each store.sources as src (src.id)}
         <div class="source-block">
-          <button class="source-row" onclick={() => toggleSource(src.id)}>
+          <button
+            class="source-row"
+            onclick={() => toggleSource(src.id)}
+            oncontextmenu={(e) => openSourceMenu(e, src.id)}
+          >
             <span class="twist">{expandedSources.has(src.id) ? "▾" : "▸"}</span>
             <span class="badge {src.kind}">{kindBadge(src.kind)}</span>
             <span class="name" title={src.title ?? src.name}>{src.title ?? src.name}</span>
@@ -227,7 +313,11 @@
                 <span class="count">{st.count.toLocaleString()}</span>
               </button>
               {#if expandedCats.has(catKey)}
-                <ResourceRows sourceId={src.id} category={st.category} />
+                <ResourceRows
+                    sourceId={src.id}
+                    category={st.category}
+                    onrowmenu={(e, m) => openRowMenu(e, m)}
+                  />
               {/if}
             {/each}
           {/if}
@@ -243,6 +333,13 @@
     </footer>
   {/if}
 </aside>
+
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
+{/if}
+{#if propsOf}
+  <SourcePropsDialog props={propsOf} onclose={() => (propsOf = null)} />
+{/if}
 
 <style>
   .explorer {
@@ -311,6 +408,36 @@
     cursor: pointer;
   }
   .insert-form .row button:disabled { opacity: 0.5; cursor: default; }
+  .insert-res {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    align-items: center;
+    margin: 0 12px 8px;
+    padding: 8px;
+    border: 1px dashed var(--border-subtle);
+    border-radius: 8px;
+    font-size: 11px;
+  }
+  .insert-res label { display: flex; align-items: center; gap: 4px; color: var(--text-2); }
+  .insert-res select, .insert-res input {
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    background: var(--bg-app);
+    color: var(--text-1);
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+  .insert-res input { width: 150px; }
+  .insert-res button {
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
   .insert-list {
     margin: 0 12px 8px;
     border: 1px dashed var(--accent);

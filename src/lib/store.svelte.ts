@@ -106,6 +106,28 @@ class AppStore {
     }
   }
 
+  /** Marks a resource deleted (export effect; revert to undo). */
+  async markDeleted(id: ResourceId) {
+    try {
+      await api.deleteResource(id);
+      this.toast("ok", "已标记删除（导出生效；可还原）");
+      this.bumpOverlay();
+    } catch (e) {
+      this.toast("error", String(e));
+    }
+  }
+
+  /** Clears the whole edit chain for one resource. */
+  async restoreResource(id: ResourceId) {
+    try {
+      await api.revertResource(id);
+      this.toast("ok", "已还原");
+      this.bumpOverlay();
+    } catch (e) {
+      this.toast("error", String(e));
+    }
+  }
+
   /** Unloads a source (tombstone); closes its tabs, keeps ids stable. */
   async removeSource(id: number) {
     try {

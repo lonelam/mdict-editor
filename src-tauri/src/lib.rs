@@ -728,6 +728,53 @@ fn serve_resolved(state: &AppState, rel: &str, ctx: Option<&ResourceId>) -> taur
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceProps {
+    id: u32,
+    kind: &'static str,
+    name: String,
+    /// Filesystem path of the backing file.
+    path: String,
+    /// File size in bytes (0 when the file vanished).
+    file_size: u64,
+    title: Option<String>,
+    entry_count: u64,
+    /// Raw header attributes (encoding, encrypted, GeneratedByEngineVersion…)
+    /// for dictionary files; empty for externals.
+    attributes: Vec<(String, String)>,
+}
+
+/// Full property sheet of one source (right-click → properties).
+#[tauri::command]
+fn source_props(id: u32, state: tauri::State<AppState>) -> Result<SourceProps, String> {
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let entry = pool.sources.get(id as usize).ok_or("source not loaded")?;
+    let attributes = match &entry.source {
+        crate::state::Source::Mdx(file) => file
+            .header()
+            .attributes()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        crate::state::Source::Mdd(file) => file
+            .header()
+            .attributes()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        crate::state::Source::External { .. } => Vec::new(),
+    };
+    Ok(SourceProps {
+        id,
+        kind: entry.kind(),
+        name: entry.name.clone(),
+        path: entry.path.display().to_string(),
+        file_size: std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0),
+        title: entry.title.clone(),
+        entry_count: entry.entry_count(),
+        attributes,
+    })
+}
+
 /// Active sources (tombstoned excluded) — lets the frontend rehydrate its
 /// list after an HMR refresh while the backend keeps its state.
 #[tauri::command]
@@ -911,6 +958,7 @@ fn insert_entry(
 fn insert_resources(
     source: u32,
     paths: Vec<String>,
+    #[allow(unused_variables)] path_prefix: Option<String>,
     state: tauri::State<AppState>,
 ) -> Result<(usize, Vec<String>), String> {
     let pool = state.pool.read().map_err(|e| e.to_string())?;
@@ -928,8 +976,11 @@ fn insert_resources(
     let mut errors = Vec::new();
     for path in paths {
         let p = std::path::Path::new(&path);
-        let name = match p.file_name() {
-            Some(n) => n.to_string_lossy().replace('\\', "/"),
+        let name = match p.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            Some(file_name) => match path_prefix.as_deref().unwrap_or("").trim() {
+                "" => file_name,
+                prefix => format!("{}/{}", prefix.trim_matches('/'), file_name),
+            },
             None => {
                 errors.push(format!("invalid path: {path}"));
                 continue;
@@ -1133,6 +1184,7 @@ pub fn run() {
             resolve_reference,
             remove_source,
             list_sources,
+            source_props,
             pipeline_dry_run_start,
             pipeline_apply_start,
             export_start,
