@@ -187,9 +187,10 @@ fn export_save_externals_writes_files() {
 }
 
 #[test]
-fn export_without_edits_reports_skip() {
+fn export_default_rebuilds_all_and_only_edited_skips() {
     let (_dir, state) = setup();
     let out = tempfile::tempdir().unwrap();
+    // Default: every active mdx is rebuilt, even with no edits.
     let report = export_build(
         &state.pool.read().unwrap(),
         &Overlay::default(),
@@ -198,15 +199,31 @@ fn export_without_edits_reports_skip() {
             mdx: true,
             ..Default::default()
         },
-    &NO_CTL)
+        &NO_CTL,
+    )
     .unwrap();
     assert_eq!(report.files.len(), 1);
-    assert!(!report.files[0].check_ok, "skipped export is not ok");
+    assert!(report.files[0].check_ok, "{}", report.files[0].message);
+    assert_eq!(report.files[0].entries, 6, "full rebuild without edits");
+
+    // Opt-in "only edited" keeps the old skip behavior.
+    let out2 = tempfile::tempdir().unwrap();
+    let report = export_build(
+        &state.pool.read().unwrap(),
+        &Overlay::default(),
+        &ExportConfig {
+            out_dir: out2.path().display().to_string(),
+            mdx: true,
+            only_edited: true,
+            ..Default::default()
+        },
+        &NO_CTL,
+    )
+    .unwrap();
+    assert!(!report.files[0].check_ok);
     assert!(report.files[0].message.contains("no edits"));
 }
 
-/// Lossy compression is export-only: it must produce a compressed copy
-/// alongside the original rebuild **without** ever touching the overlay.
 #[test]
 fn export_lossy_dual_output_and_overlay_untouched() {
     let (_dir, state) = setup();
@@ -234,7 +251,7 @@ fn export_lossy_dual_output_and_overlay_untouched() {
         .expect("lossy mdd emitted");
     assert!(lossy.check_ok, "{}", lossy.message);
     assert!(lossy.message.contains("lossy: "));
-    assert!(!report.files.iter().any(|f| f.path.ends_with("assets.edited.mdd")));
+
 
     // The overlay must not have received lossy bytes.
     assert!(state.overlay.read().unwrap().revisions.is_empty());

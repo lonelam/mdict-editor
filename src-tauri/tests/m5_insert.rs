@@ -186,6 +186,7 @@ fn remove_insertion_restores_clean_export() {
         &ExportConfig {
             out_dir: out.path().display().to_string(),
             mdx: true,
+            only_edited: true,
             ..Default::default()
         },
         &NO_CTL,

@@ -28,6 +28,9 @@ pub struct ExportConfig {
     pub embed_target: Option<u32>,
     /// Copy external files' current content next to the outputs.
     pub save_externals: bool,
+    /// Skip sources without edits/insertions. Default false: every active
+    /// mdx/mdd is rebuilt so the output set is complete.
+    pub only_edited: bool,
     /// Lossy transform chain applied **only** to a compressed copy
     /// (`<name>.lossy.mdd`) emitted alongside the original rebuild. The
     /// overlay and every other output never see lossy bytes — lossy
@@ -81,6 +84,7 @@ fn rebuild_mdx_source(
     overlay: &Overlay,
     src_idx: usize,
     out_path: &Path,
+    only_edited: bool,
     ctl: &JobCtl,
 ) -> Result<ExportedFile, String> {
     let Source::Mdx(file) = &pool.sources[src_idx].source else {
@@ -92,7 +96,7 @@ fn rebuild_mdx_source(
         .iter()
         .filter(|i| i.target as usize == src_idx && i.kind == InsertKind::Entry)
         .collect();
-    if edits_map.is_empty() && insertions.is_empty() {
+    if only_edited && edits_map.is_empty() && insertions.is_empty() {
         return Ok(ExportedFile {
             path: out_path.display().to_string(),
             entries: 0,
@@ -430,7 +434,7 @@ pub fn export_build(
             }
             let name = pool.sources[idx].name.trim_end_matches(".mdx").to_string();
             let out_path = out_dir.join(format!("{name}.edited.mdx"));
-            let file = rebuild_mdx_source(pool, overlay, idx, &out_path, ctl)?;
+            let file = rebuild_mdx_source(pool, overlay, idx, &out_path, config.only_edited, ctl)?;
             report.ok |= file.check_ok;
             report.files.push(file);
         }
@@ -448,10 +452,15 @@ pub fn export_build(
 
     if config.mdd {
         for idx in 0..pool.sources.len() {
+            if pool.sources[idx].tombstone
+                || !matches!(pool.sources[idx].source, Source::Mdd(_))
+            {
+                continue;
+            }
             let has_edits = overlay.revisions.keys().any(
                 |id| matches!(id, ResourceId::Mdd { source, .. } if *source as usize == idx),
             ) || overlay.insertions.iter().any(|i| i.target as usize == idx);
-            if !has_edits && !receives_embed(idx) {
+            if config.only_edited && !has_edits && !receives_embed(idx) {
                 continue;
             }
             let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();

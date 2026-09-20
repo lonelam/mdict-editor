@@ -16,6 +16,7 @@ export interface SourceInfo {
   name: string;
   title: string | null;
   entryCount: number;
+  dir: string | null;
 }
 
 export interface ResourceMeta {
@@ -88,6 +89,8 @@ export interface ExportConfig {
   embedExternals: boolean;
   embedTarget: number | null;
   saveExternals: boolean;
+  /** Skip sources without edits/insertions (default: rebuild everything). */
+  onlyEdited: boolean;
   /** Lossy chain applied only to the `.lossy.mdd` copy; originals unaffected. */
   lossy: Processor[] | null;
 }

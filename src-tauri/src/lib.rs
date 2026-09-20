@@ -96,6 +96,8 @@ struct SourceInfo {
     name: String,
     title: Option<String>,
     entry_count: u64,
+    /// Parent directory of the source file (export default location).
+    dir: Option<String>,
 }
 
 /// Content of one resource: text inline for text categories, base64 otherwise.
@@ -165,6 +167,10 @@ fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ope
                     name: entry.name.clone(),
                     title: entry.title.clone(),
                     entry_count: entry.entry_count(),
+                    dir: entry
+                        .path
+                        .parent()
+                        .map(|p| p.display().to_string()),
                 };
                 pool.sources.push(entry);
                 registry.indices.push(None);
@@ -631,6 +637,7 @@ fn list_sources(state: tauri::State<AppState>) -> Result<Vec<SourceInfo>, String
             name: e.name.clone(),
             title: e.title.clone(),
             entry_count: e.entry_count(),
+            dir: e.path.parent().map(|p| p.display().to_string()),
         })
         .collect())
 }

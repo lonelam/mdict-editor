@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import * as api from "../lib/api";
   import { store } from "../lib/store.svelte";
   import type { ExportReport } from "../lib/types";
@@ -12,6 +13,22 @@
   let embedTarget = $state<number | null>(null);
   let saveExternals = $state(false);
   let lossy = $state(false);
+  let onlyEdited = $state(false);
+
+  // Default output location: the first mdx source's folder (else any source's).
+  const defaultDir = $derived(
+    store.sources.find((s) => s.kind === "mdx")?.dir ??
+      store.sources.find((s) => s.dir)?.dir ??
+      ""
+  );
+  $effect(() => {
+    if (!outDir && defaultDir) outDir = defaultDir;
+  });
+
+  async function pickDir() {
+    const picked = await openDialog({ directory: true });
+    if (typeof picked === "string") outDir = picked;
+  }
 
   let running = $state(false);
   let report = $state<ExportReport | null>(null);
@@ -36,6 +53,7 @@
         embedExternals: embed,
         embedTarget,
         saveExternals,
+        onlyEdited,
         lossy: lossy
           ? [{ kind: "img-convert", format: "jpeg", quality: 75 }]
           : null,
@@ -173,8 +191,21 @@
   .x { border: none; background: none; font-size: 16px; cursor: pointer; color: var(--text-3); }
   section { font-size: 13px; }
   section.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .dir-row { display: flex; gap: 6px; }
+  .browse {
+    flex-shrink: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-app);
+    color: var(--text-1);
+    font-size: 12px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  .browse:hover { background: var(--bg-hover); }
   .dir {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     box-sizing: border-box;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
