@@ -121,7 +121,7 @@ fn main() {
     let overlay = mdict_editor_lib::state::Overlay::default();
     let config = mdict_editor_lib::export::ExportConfig {
         out_dir: out_dir.display().to_string(),
-        mdd: true,
+        edited: true,
         only_edited: false,
         ..Default::default()
     };
@@ -134,7 +134,7 @@ fn main() {
     let _ = std::fs::create_dir_all(&out_dir2);
     let config = mdict_editor_lib::export::ExportConfig {
         out_dir: out_dir2.display().to_string(),
-        mdd: true,
+        edited: true,
         only_edited: false,
         lossy: Some(vec![
             Processor::ImgWebp { quality: Some(75) },

@@ -19,23 +19,22 @@ use crate::state::{current_bytes, InsertKind, Overlay, ResourceId, Source, Sourc
 #[serde(rename_all = "camelCase", default)]
 pub struct ExportConfig {
     pub out_dir: String,
-    /// Rebuild MDX sources that have entry edits.
-    pub mdx: bool,
-    /// Rebuild MDD sources that have resource edits (or receive embeds).
-    pub mdd: bool,
-    /// Embed external js/css files into the MDD output.
+    /// Emit the `edited/` folder: every loaded source (mdx/mdd under their
+    /// original names, external js/css copied verbatim), with overlay edits
+    /// applied. Nothing irreversible happens here.
+    pub edited: bool,
+    /// Emit the `lossy/` folder: the same complete file set, with this lossy
+    /// chain applied to MDD resources (images/audio only — js/css are never
+    /// touched: minifiers have broken real-world dictionary scripts).
+    /// None = do not generate the folder.
+    /// Embed external js/css files into the edited MDD output as well.
     pub embed_externals: bool,
-    /// MDD source index to embed into; None → a new `<externals>.mdd`.
+    /// MDD source index to embed into; None → the first MDD source.
     pub embed_target: Option<u32>,
-    /// Copy external files' current content next to the outputs.
-    pub save_externals: bool,
-    /// Skip sources without edits/insertions. Default false: every active
-    /// mdx/mdd is rebuilt so the output set is complete.
+    /// Skip mdx/mdd rebuilds without edits/insertions in the edited folder
+    /// (external files still copy). Default false: complete output set.
     pub only_edited: bool,
-    /// Lossy transform chain applied **only** to a compressed copy
-    /// (`<name>.lossy.mdd`) emitted alongside the original rebuild. The
-    /// overlay and every other output never see lossy bytes — lossy
-    /// compression is irreversible, so it happens exclusively at export.
+    /// Lossy transform chain for the lossy folder.
     pub lossy: Option<Vec<Processor>>,
 }
 
@@ -417,23 +416,7 @@ pub fn export_build(
     }
     std::fs::create_dir_all(&config.out_dir).map_err(|e| format!("mkdir: {e}"))?;
     let out_dir = Path::new(&config.out_dir);
-    let mut report = ExportReport::default();
     let externals = external_contents(pool, overlay);
-
-    if config.mdx {
-        for idx in 0..pool.sources.len() {
-            if pool.sources[idx].tombstone
-                || !matches!(pool.sources[idx].source, Source::Mdx(_))
-            {
-                continue;
-            }
-            let name = pool.sources[idx].name.trim_end_matches(".mdx").to_string();
-            let out_path = out_dir.join(format!("{name}.edited.mdx"));
-            let file = rebuild_mdx_source(pool, overlay, idx, &out_path, config.only_edited, ctl)?;
-            report.ok |= file.check_ok;
-            report.files.push(file);
-        }
-    }
 
     // A source receives the embedded externals when explicitly targeted, or
     // implicitly as "the first MDD source" when no target was chosen.
@@ -445,101 +428,141 @@ pub fn export_build(
             }
     };
 
-    if config.mdd {
+    let mut report = ExportReport::default();
+    let mut name_seen: std::collections::HashSet<(bool, String)> =
+        std::collections::HashSet::new();
+
+    // ---- edited/: every loaded source under its original name ----
+    if config.edited {
+        let edited_dir = out_dir.join("edited");
+        std::fs::create_dir_all(&edited_dir).map_err(|e| format!("mkdir edited: {e}"))?;
         for idx in 0..pool.sources.len() {
-            if pool.sources[idx].tombstone
-                || !matches!(pool.sources[idx].source, Source::Mdd(_))
-            {
+            let entry = &pool.sources[idx];
+            if entry.tombstone {
                 continue;
             }
-            let has_edits = overlay.revisions.keys().any(
-                |id| matches!(id, ResourceId::Mdd { source, .. } if *source as usize == idx),
-            ) || overlay.insertions.iter().any(|i| i.target as usize == idx);
-            if config.only_edited && !has_edits && !receives_embed(idx) {
-                continue;
-            }
-            let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
-            let out_path = out_dir.join(format!("{name}.edited.mdd"));
-            let (file, skipped) =
-                rebuild_mdd_source(pool, overlay, idx, &out_path, &externals, None, ctl)?;
-            report.ok |= file.check_ok;
-            report.skipped_externals.extend(skipped);
-            report.files.push(file);
-        }
-
-        // Externals requested but no MDD source exists → standalone file.
-        if !externals.is_empty()
-            && config.embed_target.is_none()
-            && first_mdd_index(pool).is_none()
-        {
-            let mut builder = mdictlib::MddBuilder::with_options(
-                mdictlib::WriteOptions::new()
-                    .with_compression(mdictlib::WriteCompression::Zlib),
-            );
-            builder.header_attribute("Title", "External resources").ok();
-            for (name, bytes) in &externals {
-                builder.add_resource(name, bytes).map_err(|e| e.to_string())?;
-            }
-            let mut out = Vec::new();
-            builder.finish(&mut out).map_err(|e| e.to_string())?;
-            let out_path = out_dir.join("externals.mdd");
-            std::fs::write(&out_path, &out).map_err(|e| e.to_string())?;
-            let reopened = mdictlib::MddFile::open(&out_path).map_err(|e| format!("reopen failed: {e}"))?;
-            let check_ok = reopened.len() == externals.len() as u64;
-            report.ok |= check_ok;
-            report.files.push(ExportedFile {
-                path: out_path.display().to_string(),
-                entries: reopened.len(),
-                bytes: out.len() as u64,
-                check_ok,
-                message: String::new(),
-            });
-        }
-    }
-
-    // Lossy copies: emitted for **every** MDD source (edited or not), built
-    // from the same overlay state but with the lossy chain applied on the
-    // fly. Purely additive — the original rebuilds above are unaffected.
-    if let Some(lossy_steps) = &config.lossy {
-        if !lossy_steps.is_empty() {
-            for idx in 0..pool.sources.len() {
-                if pool.sources[idx].tombstone
-                    || !matches!(pool.sources[idx].source, Source::Mdd(_))
-                {
-                    continue;
+            let has_work = || {
+                overlay.revisions.keys().any(|id| id.source_index() as usize == idx)
+                    || overlay.insertions.iter().any(|i| i.target as usize == idx)
+            };
+            match &entry.source {
+                Source::Mdx(_) => {
+                    if config.only_edited && !has_work() {
+                        continue;
+                    }
+                    if !name_seen.insert((false, entry.name.clone())) {
+                        return Err(format!("edited/ 文件名冲突: {}", entry.name));
+                    }
+                    let out_path = edited_dir.join(&entry.name);
+                    let file = rebuild_mdx_source(pool, overlay, idx, &out_path, config.only_edited, ctl)?;
+                    report.ok |= file.check_ok;
+                    report.files.push(file);
                 }
-                let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
-                let out_path = out_dir.join(format!("{name}.lossy.mdd"));
-                let lossy_externals: &[(String, Vec<u8>)] =
-                    if receives_embed(idx) { &externals } else { &[] };
-                let (file, skipped) = rebuild_mdd_source(
-                    pool,
-                    overlay,
-                    idx,
-                    &out_path,
-                    lossy_externals,
-                    Some(lossy_steps),
-                    ctl,
-                )?;
-                report.ok |= file.check_ok;
-                report.skipped_externals.extend(skipped);
-                report.files.push(file);
+                Source::Mdd(_) => {
+                    if config.only_edited && !has_work() && !receives_embed(idx) {
+                        continue;
+                    }
+                    if !name_seen.insert((false, entry.name.clone())) {
+                        return Err(format!("edited/ 文件名冲突: {}", entry.name));
+                    }
+                    let out_path = edited_dir.join(&entry.name);
+                    let exts: Vec<(String, Vec<u8>)> = if receives_embed(idx) {
+                        externals.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let (file, skipped) =
+                        rebuild_mdd_source(pool, overlay, idx, &out_path, &exts, None, ctl)?;
+                    report.ok |= file.check_ok;
+                    report.skipped_externals.extend(skipped);
+                    report.files.push(file);
+                }
+                Source::External { .. } => {
+                    let id = ResourceId::Ext { file: idx as u32 };
+                    let bytes = crate::state::current_bytes(pool, overlay, &id)?;
+                    let out_path = edited_dir.join(&entry.name);
+                    std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
+                    report.files.push(ExportedFile {
+                        path: out_path.display().to_string(),
+                        entries: 0,
+                        bytes: bytes.len() as u64,
+                        check_ok: true,
+                        message: "copied external".into(),
+                    });
+                    report.ok = true;
+                }
             }
         }
     }
 
-    if config.save_externals {
-        for (name, bytes) in &externals {
-            let path = out_dir.join(name);
-            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-            report.files.push(ExportedFile {
-                path: path.display().to_string(),
-                entries: 0,
-                bytes: bytes.len() as u64,
-                check_ok: true,
-                message: "saved external".into(),
-            });
-            report.ok = true;
+    // ---- lossy/: the same complete set; MDD resources run the lossy chain
+    // (images/audio only), mdx and externals are copied verbatim. ----
+    if let Some(lossy_steps) = config.lossy.clone().filter(|s| !s.is_empty()) {
+        let lossy_dir = out_dir.join("lossy");
+        std::fs::create_dir_all(&lossy_dir).map_err(|e| format!("mkdir lossy: {e}"))?;
+        for idx in 0..pool.sources.len() {
+            let entry = &pool.sources[idx];
+            if entry.tombstone {
+                continue;
+            }
+            match &entry.source {
+                Source::Mdd(_) => {
+                    if !name_seen.insert((true, entry.name.clone())) {
+                        return Err(format!("lossy/ 文件名冲突: {}", entry.name));
+                    }
+                    let out_path = lossy_dir.join(&entry.name);
+                    let (file, skipped) = rebuild_mdd_source(
+                        pool,
+                        overlay,
+                        idx,
+                        &out_path,
+                        &[],
+                        Some(&lossy_steps),
+                        ctl,
+                    )?;
+                    report.ok |= file.check_ok;
+                    report.skipped_externals.extend(skipped);
+                    report.files.push(file);
+                }
+                Source::Mdx(_) => {
+                    // Entries are not lossy-processed; reuse the edited build
+                    // when present, otherwise a plain rebuild.
+                    if !name_seen.insert((true, entry.name.clone())) {
+                        return Err(format!("lossy/ 文件名冲突: {}", entry.name));
+                    }
+                    let out_path = lossy_dir.join(&entry.name);
+                    let edited_path = out_dir.join("edited").join(&entry.name);
+                    if config.edited && edited_path.exists() {
+                        std::fs::copy(&edited_path, &out_path).map_err(|e| e.to_string())?;
+                        let bytes = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+                        report.files.push(ExportedFile {
+                            path: out_path.display().to_string(),
+                            entries: 0,
+                            bytes,
+                            check_ok: true,
+                            message: "same as edited".into(),
+                        });
+                    } else {
+                        let file =
+                            rebuild_mdx_source(pool, overlay, idx, &out_path, false, ctl)?;
+                        report.ok |= file.check_ok;
+                        report.files.push(file);
+                    }
+                }
+                Source::External { .. } => {
+                    let id = ResourceId::Ext { file: idx as u32 };
+                    let bytes = crate::state::current_bytes(pool, overlay, &id)?;
+                    let out_path = lossy_dir.join(&entry.name);
+                    std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
+                    report.files.push(ExportedFile {
+                        path: out_path.display().to_string(),
+                        entries: 0,
+                        bytes: bytes.len() as u64,
+                        check_ok: true,
+                        message: "copied external".into(),
+                    });
+                }
+            }
         }
     }
 

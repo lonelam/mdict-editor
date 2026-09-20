@@ -7,12 +7,11 @@
   let { onclose }: { onclose: () => void } = $props();
 
   let outDir = $state("");
-  let rebuildMdx = $state(true);
-  let rebuildMdd = $state(true);
   let embed = $state(false);
   let embedTarget = $state<number | null>(null);
-  let saveExternals = $state(false);
-  let lossy = $state(false);
+  let genEdited = $state(true);
+  let genLossy = $state(false);
+  // (duplicate genLossy removed)
   let onlyEdited = $state(false);
 
   // Default output location: the first mdx source's folder (else any source's).
@@ -49,19 +48,14 @@
     try {
       const start = api.exportStart({
         outDir,
-        mdx: rebuildMdx,
-        mdd: rebuildMdd,
+        edited: genEdited,
         embedExternals: embed,
         embedTarget,
-        saveExternals,
         onlyEdited,
-        lossy: lossy
+        lossy: genLossy
           ? [
               { kind: "img-webp", quality: 75 },
               { kind: "png-quantize", colors: 256 },
-              { kind: "css-purge" },
-              { kind: "minify-css" },
-              { kind: "minify-js" },
               { kind: "audio-opus", bitrateKbps: 24 },
             ]
           : null,
@@ -113,8 +107,14 @@
 
     <section>
       <h3>内容</h3>
-      <label><input type="checkbox" bind:checked={rebuildMdx} /> 重建有词条修订的 MDX</label>
-      <label><input type="checkbox" bind:checked={rebuildMdd} /> 重建有资源修订的 MDD</label>
+      <label>
+        <input type="checkbox" bind:checked={genEdited} />
+        生成 <b>edited/</b>（保真版：全部已加载文件原名导出，含编辑与插入）
+      </label>
+      <label>
+        <input type="checkbox" bind:checked={genLossy} />
+        生成 <b>lossy/</b>（压缩分发版：同一套文件；图片 WebP + PNG 量化 + 音频 Opus；JS/CSS 不动）
+      </label>
       {#if hasExternals}
         <label><input type="checkbox" bind:checked={embed} /> 嵌入外部 js/css 到 MDD</label>
         {#if embed}
@@ -125,17 +125,13 @@
             {/each}
           </select>
         {/if}
-        <label><input type="checkbox" bind:checked={saveExternals} /> 外部文件另存为普通文件</label>
       {:else}
         <p class="note">未加载外部 js/css 文件，嵌入选项不可用。</p>
       {/if}
-      <label>
-        <input type="checkbox" bind:checked={lossy} /> 同时生成有损压缩副本 (.lossy.mdd)
-      </label>
       <p class="note">
         有损副本独立于原始版本：原始产物照常导出，改写层与源文件不受影响。
-        当前链：图片转有损 WebP（保透明）+ PNG 调色板量化 + 发音音频转 Opus 24kbps +
-        CSS 死规则清除 + CSS/JS 压缩；字体子集化将随后续版本接入。
+        两个文件夹各自包含全部已加载文件；lossy/ 只转换图片与音频，词典 JS/CSS 原样复制
+        （压缩会破坏部分词典脚本）。
       </p>
     </section>
 

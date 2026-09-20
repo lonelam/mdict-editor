@@ -88,15 +88,14 @@ export interface StepReport {
 
 export interface ExportConfig {
   outDir: string;
-  mdx: boolean;
-  mdd: boolean;
+  /** Emit the `edited/` folder: all loaded sources, overlay edits applied. */
+  edited: boolean;
+  /** Emit the `lossy/` folder (chain below); images/audio only, js/css untouched. */
+  lossy: Processor[] | null;
   embedExternals: boolean;
   embedTarget: number | null;
-  saveExternals: boolean;
-  /** Skip sources without edits/insertions (default: rebuild everything). */
+  /** Skip mdx/mdd rebuilds without edits in edited/ (externals still copy). */
   onlyEdited: boolean;
-  /** Lossy chain applied only to the `.lossy.mdd` copy; originals unaffected. */
-  lossy: Processor[] | null;
 }
 
 export interface ExportedFile {

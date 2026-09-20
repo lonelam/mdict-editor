@@ -46,7 +46,7 @@ fn insert_entry_materializes_at_export() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdx: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
@@ -94,7 +94,7 @@ fn insert_resource_materializes_with_lossy_chain() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdd: true,
+            edited: true,
             lossy: Some(vec![mdict_editor_lib::processors::Processor::ImgConvert {
                 format: "jpeg".into(),
                 quality: Some(75),
@@ -112,7 +112,7 @@ fn insert_resource_materializes_with_lossy_chain() {
     let lossy = report
         .files
         .iter()
-        .find(|f| f.path.ends_with("lossy.mdd"))
+        .find(|f| f.path.contains("lossy") && f.path.ends_with("assets.mdd"))
         .unwrap();
     let reopened = mdictlib::MddFile::open(&lossy.path).unwrap();
     let added = reopened.lookup("img/added.png").unwrap().expect("inserted resource");
@@ -185,13 +185,18 @@ fn remove_insertion_restores_clean_export() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdx: true,
-            only_edited: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert!(!report.files[0].check_ok);
-    assert!(report.files[0].message.contains("no edits"));
+    let file = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("ocean.mdx"))
+        .expect("mdx exported");
+    assert!(file.check_ok);
+    let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
+    assert!(reopened.locate("temp").unwrap().is_none(), "removed insertion absent");
 }

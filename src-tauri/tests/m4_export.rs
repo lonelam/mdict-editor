@@ -40,14 +40,13 @@ fn export_edited_mdx_and_reopen() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdx: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1, "{:?}", report.files);
-    let file = &report.files[0];
+    let file = report.files.iter().find(|f| f.path.ends_with("ocean.mdx")).expect("mdx in edited/");
     assert!(file.check_ok, "message: {}", file.message);
     assert_eq!(file.entries, 5, "6 minus 1 deleted");
 
@@ -88,15 +87,14 @@ fn export_edited_mdd_with_externals_embedded() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdd: true,
+            edited: true,
             embed_externals: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1, "{:?}", report.files);
-    let file = &report.files[0];
+    let file = report.files.iter().find(|f| f.path.ends_with("assets.mdd")).expect("mdd in edited/");
     assert!(file.check_ok, "message: {}", file.message);
     // 9 - 1 deleted + 2 embedded
     assert_eq!(file.entries, 10);
@@ -121,28 +119,23 @@ fn export_embed_rebuilds_even_without_edits() {
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdd: true,
+            edited: true,
             embed_externals: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1, "{:?}", report.files);
-    assert!(report.files[0].check_ok, "{}", report.files[0].message);
-    assert_eq!(report.files[0].entries, 11, "9 original + 2 embedded");
-    assert!(report.files[0].path.ends_with("assets.edited.mdd"));
+    let file = report.files.iter().find(|f| f.path.ends_with("assets.mdd")).expect("mdd in edited/");
+    assert!(file.check_ok, "{}", file.message);
+    assert_eq!(file.entries, 11, "9 original + 2 embedded");
 }
 
 #[test]
-fn export_externals_only_makes_standalone_mdd() {
+fn export_externals_only_copies_files_into_edited() {
     let dir = tempfile::tempdir().unwrap();
-    let (_mdx, _mdd, ext_css, ext_js) = {
-        let paths = fixtures::write_all(dir.path());
-        paths
-    };
-    // Only the externals are loaded.
-    let mut state = AppState::default();
+    let (_mdx, _mdd, ext_css, ext_js) = fixtures::write_all(dir.path());
+    let state = AppState::default();
     {
         let mut pool = state.pool.write().unwrap();
         for p in [&ext_css, &ext_js] {
@@ -155,20 +148,19 @@ fn export_externals_only_makes_standalone_mdd() {
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdd: true,
-            embed_externals: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1);
-    assert!(report.files[0].path.ends_with("externals.mdd"));
-    assert!(report.files[0].check_ok);
-    assert_eq!(report.files[0].entries, 2);
-
-    let reopened = mdictlib::MddFile::open(&report.files[0].path).unwrap();
-    assert!(reopened.lookup("script-ext.js").unwrap().is_some());
+    // 外部文件原样进入 edited/（不再生成独立 externals.mdd）。
+    assert_eq!(report.files.len(), 2);
+    for f in &report.files {
+        assert!(f.path.contains("edited"), "{}", f.path);
+        assert!(f.check_ok);
+    }
+    assert!(report.files.iter().any(|f| f.path.ends_with("script-ext.js")));
 }
 
 #[test]
@@ -180,13 +172,13 @@ fn export_save_externals_writes_files() {
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            save_externals: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 2);
+    assert_eq!(report.files.len(), 4, "{:?}", report.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>());
     let css = report.files.iter().find(|f| f.path.ends_with("style-ext.css")).unwrap();
     assert_eq!(std::fs::read(&css.path).unwrap(), b".ext { padding: 4px; background: url(\"img/logo.png\"); }\n");
 }
@@ -201,15 +193,16 @@ fn export_default_rebuilds_all_and_only_edited_skips() {
         &Overlay::default(),
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdx: true,
+            edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert_eq!(report.files.len(), 1);
-    assert!(report.files[0].check_ok, "{}", report.files[0].message);
-    assert_eq!(report.files[0].entries, 6, "full rebuild without edits");
+    assert_eq!(report.files.len(), 4);
+    let mdx = report.files.iter().find(|f| f.path.ends_with("ocean.mdx")).unwrap();
+    assert!(mdx.check_ok, "{}", mdx.message);
+    assert_eq!(mdx.entries, 6, "full rebuild without edits");
 
     // Opt-in "only edited" keeps the old skip behavior.
     let out2 = tempfile::tempdir().unwrap();
@@ -218,15 +211,15 @@ fn export_default_rebuilds_all_and_only_edited_skips() {
         &Overlay::default(),
         &ExportConfig {
             out_dir: out2.path().display().to_string(),
-            mdx: true,
+            edited: true,
             only_edited: true,
             ..Default::default()
         },
         &no_ctl(),
     )
     .unwrap();
-    assert!(!report.files[0].check_ok);
-    assert!(report.files[0].message.contains("no edits"));
+    assert!(report.files.iter().all(|f| f.message == "copied external"),
+        "{:?}", report.files.iter().map(|f| f.message.clone()).collect::<Vec<_>>());
 }
 
 #[test]
@@ -253,7 +246,7 @@ fn export_lossy_dual_output_and_overlay_untouched() {
     let lossy = report
         .files
         .iter()
-        .find(|f| f.path.ends_with("assets.lossy.mdd"))
+        .find(|f| f.path.contains("lossy") && f.path.ends_with("assets.mdd"))
         .expect("lossy mdd emitted");
     assert!(lossy.check_ok, "{}", lossy.message);
     assert!(lossy.message.contains("lossy: "));
@@ -319,7 +312,7 @@ fn export_lossy_preserves_transparent_images() {
     let lossy = report
         .files
         .iter()
-        .find(|f| f.path.ends_with("alpha.lossy.mdd"))
+        .find(|f| f.path.contains("lossy") && f.path.ends_with("alpha.mdd"))
         .expect("lossy emitted");
     let reopened = mdictlib::MddFile::open(&lossy.path).unwrap();
     let alpha = reopened.lookup("img/alpha.png").unwrap().expect("alpha");
@@ -351,7 +344,7 @@ fn export_edited_and_lossy_coexist() {
         &overlay,
         &ExportConfig {
             out_dir: out.path().display().to_string(),
-            mdd: true,
+            edited: true,
             lossy: Some(vec![Processor::ImgConvert {
                 format: "jpeg".into(),
                 quality: Some(75),
@@ -362,8 +355,8 @@ fn export_edited_and_lossy_coexist() {
     )
     .unwrap();
 
-    let edited = report.files.iter().find(|f| f.path.ends_with("assets.edited.mdd")).unwrap();
-    let lossy = report.files.iter().find(|f| f.path.ends_with("assets.lossy.mdd")).unwrap();
+    let edited = report.files.iter().find(|f| f.path.contains("edited") && f.path.ends_with("assets.mdd")).unwrap();
+    let lossy = report.files.iter().find(|f| f.path.contains("lossy") && f.path.ends_with("assets.mdd")).unwrap();
     assert!(edited.check_ok && lossy.check_ok);
 
     // Both carry the edit; only the lossy copy converts images.
