@@ -34,6 +34,7 @@
   let report = $state<ExportReport | null>(null);
   let job = $state<string | null>(null);
   let progress = $state<{ done: number; total: number; item: string } | null>(null);
+  let exportedMdx = $state<string[]>([]);
 
   const mddSources = $derived(store.sources.filter((s) => s.kind === "mdd"));
   const hasExternals = $derived(store.sources.some((s) => s.kind === "ext"));
@@ -74,6 +75,9 @@
       } else {
         store.toast(report.ok ? "ok" : "info", `导出完成：${ok}/${report.files.length} 项校验通过`);
       }
+      exportedMdx = report.files
+        .filter((f) => f.path.toLowerCase().endsWith(".mdx"))
+        .map((f) => f.path);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       store.toast(msg === "已取消" ? "info" : "error", msg);
@@ -100,7 +104,10 @@
 
     <section>
       <h3>输出目录</h3>
-      <input class="dir" bind:value={outDir} placeholder="例如 D:\\export\\dict" />
+      <div class="dir-row">
+        <input class="dir" bind:value={outDir} placeholder="例如 D:\\export\\dict" />
+        <button class="browse" onclick={pickDir}>浏览…</button>
+      </div>
     </section>
 
     <section>
@@ -152,7 +159,10 @@
           {/if}
         </div>
       {:else}
-        <p class="note">所有输出写入改写层之上的构建结果；每个文件导出后自动重新打开校验（条目数 + 抽查内容）。</p>
+        <p class="note">
+          所有输出写入改写层之上的构建结果；每个文件导出后自动重新打开校验（条目数 + 抽查内容）。
+          导出的词典可一键导入 <b>AALookup</b>（与本应用同构的阅读器：同一 mdictlib 解析核心、同一资源解析顺序，编辑所见即阅读所得）。
+        </p>
       {/if}
     </section>
 
@@ -164,6 +174,22 @@
       </div>
     {/if}
     <footer>
+      <button
+        class="aalookup"
+        disabled={running || exportedMdx.length === 0}
+        title={exportedMdx.length === 0 ? "完成一次包含 MDX 的导出后可用" : "把本次导出的词典交给 AALookup 打开"}
+        onclick={async () => {
+          try {
+            const msg = await api.importToAALookup(exportedMdx);
+            store.toast("ok", msg);
+          } catch (e) {
+            store.toast("error", String(e));
+          }
+        }}
+      >
+        ⬇ 一键导入 AALookup
+      </button>
+      <span class="grow"></span>
       <button disabled={running} onclick={run}>{running ? "构建中…" : "开始导出"}</button>
     </footer>
   </div>
@@ -277,6 +303,13 @@
     cursor: pointer;
   }
   footer button:disabled { opacity: 0.5; cursor: default; }
+  footer .grow { flex: 1; }
+  footer .aalookup {
+    border-color: #30a14e;
+    color: #30a14e;
+    background: var(--bg-app);
+  }
+  footer .aalookup:hover:not(:disabled) { background: #e9f9ee; }
   .job-progress {
     display: flex;
     align-items: center;

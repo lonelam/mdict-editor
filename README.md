@@ -33,6 +33,16 @@
 
 打 `v*` 标签或手动触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建三端安装包并自动发布到 GitHub Releases：Windows（NSIS/MSI）、macOS（Universal DMG，Apple Silicon + Intel）、Linux（AppImage/deb）。
 
+## 与 AALookup 的关系（同构）
+
+本编辑器与 [AALookup](https://github.com/lonelam/aalookup) 词典阅读器**同源同构**：
+
+- **同一解析核心**：两者都构建在开源 Rust 庐 [mdictlib](https://crates.io/crates/mdictlib) 之上——同一套 MDX/MDD 解析、定位与块解码逻辑；
+- **同一资源解析顺序**：词条内资源引用按与 AALookup 阅读器一致的顺序解析（词典目录旁的松散文件优先，其次 MDD 内资源，键大小写与分隔符归一化，唯一后缀回退），编辑预览即阅读效果；
+- **一键衔接**：导出对话框提供 **"一键导入 AALookup"** 按钮——导出的 .mdx 直接交给 AALookup 打开并启用（AALookup 正在运行时即时出现在词库中），用阅读视角检验编辑成果。
+
+编辑用 mdict-editor，阅读用 AALookup，一对同构工具覆盖词典工作流两端。
+
 ## 运行
 
 ```bash

@@ -1020,6 +1020,85 @@ fn remove_insertion(index: usize, state: tauri::State<AppState>) -> Result<bool,
     Ok(true)
 }
 
+/// Hands exported dictionary files to AALookup — the reader app this editor
+/// shares its parsing core (mdictlib) and resource-resolution order with.
+/// AALookup imports and enables .mdx files handed to it on the command line
+/// (its single-instance plugin forwards to a running copy).
+#[tauri::command]
+fn import_to_aalookup(paths: Vec<String>) -> Result<String, String> {
+    if paths.is_empty() {
+        return Err("没有可导入的 .mdx 文件（先完成一次导出）".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let exe = find_aalookup_exe_windows()
+            .ok_or("未找到 AALookup：请先安装 AALookup，或将 .mdx 关联到 AALookup")?;
+        std::process::Command::new(&exe)
+            .args(&paths)
+            .spawn()
+            .map_err(|e| format!("启动 AALookup 失败: {e}"))?;
+        Ok(format!("已交给 AALookup 导入 {} 个词典", paths.len()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = paths;
+        Err("一键导入当前仅支持 Windows；请在 AALookup 中手动打开导出的 .mdx".into())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_aalookup_exe_windows() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let reg_query = |key: &str| -> Option<String> {
+        let out = std::process::Command::new("reg")
+            .args(["query", key, "/ve"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().find_map(|l| {
+            let l = l.trim_end();
+            let idx = l.find("REG_SZ")?;
+            let v = l[idx + 6..].trim();
+            (!v.is_empty()).then(|| v.to_string())
+        })
+    };
+
+    // 1) .mdx shell association, accepted only when it is AALookup itself.
+    if let Some(progid) = reg_query("HKCR\\.mdx") {
+        if let Some(cmdline) = reg_query(&format!("HKCR\\{progid}\\shell\\open\\command")) {
+            let candidate = if let Some(stripped) = cmdline.strip_prefix('"') {
+                stripped.split('"').next().unwrap_or("").to_string()
+            } else if let Some(pos) = cmdline.to_lowercase().find(".exe") {
+                cmdline[..pos + 4].to_string()
+            } else {
+                cmdline.clone()
+            };
+            let path = PathBuf::from(&candidate);
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.to_lowercase().contains("aalookup"))
+                && path.exists()
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    // 2) Common install locations.
+    let locals = std::env::var("LOCALAPPDATA").ok()?;
+    for p in [
+        PathBuf::from(&locals).join("Programs").join("AALookup").join("AALookup.exe"),
+        PathBuf::from(&locals).join("AALookup").join("AALookup.exe"),
+        PathBuf::from(r"C:\Program Files").join("AALookup").join("AALookup.exe"),
+    ] {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Flags a running job for cancellation between items.
 #[tauri::command]
 fn cancel_job(job: String, app: AppHandle) -> bool {
@@ -1058,6 +1137,7 @@ pub fn run() {
             pipeline_apply_start,
             export_start,
             cancel_job,
+            import_to_aalookup,
             insert_entry,
             insert_resources,
             list_insertions,

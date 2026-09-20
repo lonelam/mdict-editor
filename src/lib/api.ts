@@ -111,6 +111,10 @@ export const exportStart = (config: ExportConfig) =>
   invoke<string>("export_start", { config });
 export const cancelJob = (job: string) => invoke<boolean>("cancel_job", { job });
 
+/** Hands exported .mdx files to AALookup (imports + enables them there). */
+export const importToAALookup = (paths: string[]) =>
+  invoke<string>("import_to_aalookup", { paths });
+
 export interface InsertionInfo {
   index: number;
   kind: "entry" | "resource";
