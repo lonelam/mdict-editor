@@ -18,6 +18,10 @@
   let doHtml = $state(false);
   let doPng = $state(true);
   let pngLevel = $state(2);
+  let doWebp = $state(false);
+  let webpQuality = $state(75);
+  let doQuantize = $state(false);
+  let doPurge = $state(false);
 
   let running = $state(false);
   let reports = $state<StepReport[] | null>(null);
@@ -30,6 +34,9 @@
     if (doJs) steps.push({ kind: "minify-js" });
     if (doHtml) steps.push({ kind: "minify-html" });
     if (doPng) steps.push({ kind: "png-optimize", level: pngLevel });
+    if (doQuantize) steps.push({ kind: "png-quantize", colors: 256 });
+    if (doWebp) steps.push({ kind: "img-webp", quality: webpQuality });
+    if (doPurge) steps.push({ kind: "css-purge" });
     return steps;
   }
 
@@ -47,7 +54,7 @@
   }
 
   const canRun = $derived(
-    (doCss || doJs || doHtml || doPng) &&
+    (doCss || doJs || doHtml || doPng || doWebp || doQuantize || doPurge) &&
       (scopeMode !== "selection" || store.selection.length > 0) &&
       (scopeMode !== "source" || scopeSource !== null) &&
       (scopeMode !== "category" || scopeCategory !== null)
@@ -144,6 +151,14 @@
             </select>
           </label>
         {/if}
+        <label><input type="checkbox" bind:checked={doWebp} /> 图片转有损 WebP（保透明，推荐）</label>
+        {#if doWebp}
+          <label class="indented">质量 {webpQuality}
+            <input type="range" min="40" max="95" bind:value={webpQuality} />
+          </label>
+        {/if}
+        <label><input type="checkbox" bind:checked={doQuantize} /> PNG 调色板量化（256 色）</label>
+        <label><input type="checkbox" bind:checked={doPurge} /> CSS 死规则清除（按词条语料）</label>
       </div>
       <p class="note">处理器自动跳过不适用的资源；结果写入改写层，可随时还原。</p>
     </section>

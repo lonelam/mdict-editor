@@ -63,7 +63,10 @@ export type Processor =
   | { kind: "minify-html" }
   | { kind: "png-optimize"; level?: number | null }
   | { kind: "img-convert"; format: string; quality?: number | null }
-  | { kind: "img-resize"; width?: number | null; height?: number | null };
+  | { kind: "img-resize"; width?: number | null; height?: number | null }
+  | { kind: "img-webp"; quality?: number | null }
+  | { kind: "png-quantize"; colors?: number | null }
+  | { kind: "css-purge" };
 
 export interface Scope {
   all?: boolean;

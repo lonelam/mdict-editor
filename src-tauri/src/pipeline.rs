@@ -85,12 +85,21 @@ pub fn select_targets(
 pub struct JobCtl<'a> {
     pub progress: &'a (dyn Fn(u64, u64, &str) + Sync),
     pub cancelled: &'a (dyn Fn() -> bool + Sync),
+    /// Class/id names actually referenced by dictionary entries; css-purge
+    /// drops rules whose selectors never appear here. Empty = no corpus.
+    pub used_selectors: &'a std::collections::HashSet<String>,
 }
 
-pub const NO_CTL: JobCtl<'static> = JobCtl {
-    progress: &|_, _, _| {},
-    cancelled: &|| false,
-};
+static EMPTY_SELECTORS: std::sync::OnceLock<std::collections::HashSet<String>> =
+    std::sync::OnceLock::new();
+
+pub fn no_ctl() -> JobCtl<'static> {
+    JobCtl {
+        progress: &|_, _, _| {},
+        cancelled: &|| false,
+        used_selectors: EMPTY_SELECTORS.get_or_init(std::collections::HashSet::new),
+    }
+}
 
 fn run_steps(
     pool: &SourcePool,
@@ -101,95 +110,140 @@ fn run_steps(
     mut write: impl FnMut(ResourceId, Vec<u8>),
 ) -> Result<Vec<StepReport>, String> {
     let total = metas.len() as u64;
-    let mut reports = Vec::new();
-    for (i, meta) in metas.into_iter().enumerate() {
-        if (ctl.cancelled)() {
-            return Err("已取消".into());
-        }
-        (ctl.progress)(i as u64, total, &meta.key);
-        if meta.deleted {
-            continue;
-        }
-        let bytes = match overlay.get(&meta.id) {
-            Some(rev) => rev.current.clone(),
-            None => match pool.read_original(&meta.id) {
-                Ok(b) => b,
-                Err(e) => {
-                    reports.push(StepReport {
+    // CPU-bound transforms run in parallel (rayon keeps report order);
+    // progress is an atomic counter; cancellation is polled per item.
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let done = AtomicU64::new(0);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let writes: std::sync::Mutex<Vec<(ResourceId, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+    let reports: Vec<StepReport> = metas
+        .into_par_iter()
+        .map(|meta| {
+            if cancelled.load(Ordering::Relaxed) || (ctl.cancelled)() {
+                cancelled.store(true, Ordering::Relaxed);
+                return StepReport {
+                    id: meta.id,
+                    key: meta.key,
+                    before: 0,
+                    after: 0,
+                    delta: 0,
+                    status: "skip",
+                    message: "已取消".into(),
+                };
+            }
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let latest_key = meta.key.clone();
+            (ctl.progress)(n, total, &latest_key);
+            if meta.deleted {
+                return StepReport {
+                    id: meta.id,
+                    key: meta.key,
+                    before: 0,
+                    after: 0,
+                    delta: 0,
+                    status: "skip",
+                    message: "deleted".into(),
+                };
+            }
+            let bytes: Vec<u8> = match overlay.get(&meta.id) {
+                Some(rev) => rev.current.clone(),
+                None => match pool.read_original(&meta.id) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return StepReport {
+                            id: meta.id,
+                            key: meta.key,
+                            before: 0,
+                            after: 0,
+                            delta: 0,
+                            status: "error",
+                            message: e,
+                        }
+                    }
+                },
+            };
+            let (current, applied): (Vec<u8>, Option<()>) = {
+                let mut current = bytes.clone();
+                let mut error: Option<String> = None;
+                let mut applied = false;
+                for step in steps {
+                    if !step.applies_to(meta.category) {
+                        continue;
+                    }
+                    match step.process(&meta.key, &current, ctl.used_selectors) {
+                        Ok(out) => {
+                            current = out;
+                            applied = true;
+                        }
+                        Err(e) => {
+                            error = Some(format!("{}: {}", step.name(), e));
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = error {
+                    return StepReport {
                         id: meta.id,
                         key: meta.key,
-                        before: 0,
+                        before: bytes.len() as u64,
                         after: 0,
                         delta: 0,
                         status: "error",
                         message: e,
-                    });
-                    continue;
+                    };
                 }
-            },
-        };
-        // First applicable step wins; later steps of another type still run
-        // on their own resources. Multiple steps of matching types chain on
-        // the same bytes in order.
-        let mut current = bytes.clone();
-        let mut applied = false;
-        let mut error: Option<String> = None;
-        for step in steps {
-            if !step.applies_to(meta.category) {
-                continue;
-            }
-            match step.process(&meta.key, &current) {
-                Ok(out) => {
-                    current = out;
-                    applied = true;
+                (current, applied.then_some(()))
+            };
+            match applied {
+                Some(()) => {
+                    let before = bytes.len() as u64;
+                    let after = current.len() as u64;
+                    if after < before {
+                        writes
+                            .lock()
+                            .expect("writes")
+                            .push((meta.id.clone(), current.clone()));
+                        StepReport {
+                            id: meta.id,
+                            key: meta.key,
+                            before,
+                            after,
+                            delta: before as i64 - after as i64,
+                            status: "ok",
+                            message: String::new(),
+                        }
+                    } else {
+                        StepReport {
+                            id: meta.id,
+                            key: meta.key,
+                            before,
+                            after,
+                            delta: before as i64 - after as i64,
+                            status: "skip",
+                            message: "no size gain".into(),
+                        }
+                    }
                 }
-                Err(e) => {
-                    error = Some(format!("{}: {}", step.name(), e));
-                    break;
-                }
-            }
-        }
-        match (applied, error) {
-            (_, Some(e)) => reports.push(StepReport {
-                id: meta.id,
-                key: meta.key,
-                before: bytes.len() as u64,
-                after: 0,
-                delta: 0,
-                status: "error",
-                message: e,
-            }),
-            (true, None) => {
-                let before = bytes.len() as u64;
-                let after = current.len() as u64;
-                let (status, do_write) = if after < before {
-                    ("ok", true)
-                } else {
-                    ("skip", false)
-                };
-                if do_write {
-                    write(meta.id.clone(), current.clone());
-                }
-                reports.push(StepReport {
+                None => StepReport {
                     id: meta.id,
                     key: meta.key,
-                    before,
-                    after,
-                    delta: before as i64 - after as i64,
-                    status,
-                    message: String::new(),
-                });
+                    before: bytes.len() as u64,
+                    after: bytes.len() as u64,
+                    delta: 0,
+                    status: "skip",
+                    message: "no applicable processor for this resource".into(),
+                },
             }
-            (false, None) => reports.push(StepReport {
-                id: meta.id,
-                key: meta.key,
-                before: bytes.len() as u64,
-                after: bytes.len() as u64,
-                delta: 0,
-                status: "skip",
-                message: "no applicable processor for this resource".into(),
-            }),
-        }
+        })
+        .collect();
+
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("已取消".into());
+    }
+    for (id, bytes) in writes.into_inner().expect("writes") {
+        write(id, bytes);
     }
     Ok(reports)
 }

@@ -55,7 +55,13 @@
         saveExternals,
         onlyEdited,
         lossy: lossy
-          ? [{ kind: "img-convert", format: "jpeg", quality: 75 }]
+          ? [
+              { kind: "img-webp", quality: 75 },
+              { kind: "png-quantize", colors: 256 },
+              { kind: "css-purge" },
+              { kind: "minify-css" },
+              { kind: "minify-js" },
+            ]
           : null,
       });
       start.then((id) => (job = id));
@@ -120,8 +126,8 @@
       </label>
       <p class="note">
         有损副本独立于原始版本：原始产物照常导出，改写层与源文件不受影响。
-        当前链：不透明图片转 JPEG q75（透明图自动跳过）；WebP 有损 / Opus 音频 /
-        字体子集化将随后续版本接入。
+        当前链：图片转有损 WebP（保透明）+ PNG 调色板量化 + CSS 死规则清除 +
+        CSS/JS 压缩；Opus 音频 / 字体子集化将随后续版本接入。
       </p>
     </section>
 

@@ -48,6 +48,10 @@ swc_core = { version = "80", default-features = false, features = [
     "ecma_minifier",
     "ecma_visit",
 ] }
+imagequant = "4.4.1"
+png = "0.18.1"
+webpx = "0.4.0"
+rayon = "1.12.0"
 
 [features]
 default = ["processors-js"]

@@ -29,6 +29,22 @@ pub enum Processor {
         #[serde(default)]
         height: Option<u32>,
     },
+    /// Lossy WebP with alpha support (libwebp via webpx) — the highest-yield
+    /// image transform for dictionary art.
+    ImgWebp {
+        /// 0-100, higher = better quality. Default 75.
+        #[serde(default)]
+        quality: Option<u8>,
+    },
+    /// pngquant-style palette quantization: RGBA → 8-bit palette PNG.
+    PngQuantize {
+        /// 2-256 colors. Default 256.
+        #[serde(default)]
+        colors: Option<u32>,
+    },
+    /// Drops CSS rules whose class/id selectors never appear in the entry
+    /// corpus (collected by the pipeline/export job into JobCtl).
+    CssPurge,
 }
 
 impl Processor {
@@ -40,22 +56,31 @@ impl Processor {
             Processor::PngOptimize { .. } => "png-optimize",
             Processor::ImgConvert { .. } => "img-convert",
             Processor::ImgResize { .. } => "img-resize",
+            Processor::ImgWebp { .. } => "img-webp",
+            Processor::PngQuantize { .. } => "png-quantize",
+            Processor::CssPurge => "css-purge",
         }
     }
 
     pub fn applies_to(&self, category: Category) -> bool {
         match self {
             Processor::MinifyJs => category == Category::Js,
-            Processor::MinifyCss => category == Category::Css,
+            Processor::MinifyCss | Processor::CssPurge => category == Category::Css,
             Processor::MinifyHtml => matches!(category, Category::Html | Category::Entry),
             Processor::PngOptimize { .. } => category == Category::Image,
-            Processor::ImgConvert { .. } | Processor::ImgResize { .. } => {
-                category == Category::Image
-            }
+            Processor::ImgConvert { .. }
+            | Processor::ImgResize { .. }
+            | Processor::ImgWebp { .. }
+            | Processor::PngQuantize { .. } => category == Category::Image,
         }
     }
 
-    pub fn process(&self, key: &str, input: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn process(
+        &self,
+        key: &str,
+        input: &[u8],
+        used_selectors: &std::collections::HashSet<String>,
+    ) -> Result<Vec<u8>, String> {
         match self {
             Processor::MinifyJs => minify_js(input),
             Processor::MinifyCss => minify_css(input),
@@ -72,8 +97,193 @@ impl Processor {
             }
             Processor::ImgConvert { format, quality } => img_convert(input, format, *quality),
             Processor::ImgResize { width, height } => img_resize(key, input, *width, *height),
+            Processor::ImgWebp { quality } => img_webp(input, *quality),
+            Processor::PngQuantize { colors } => png_quantize(input, *colors),
+            Processor::CssPurge => css_purge(input, used_selectors),
         }
     }
+}
+
+/// Applies a processor chain to one resource's bytes under the pipeline's
+/// semantics: text processors run in order; image re-encodes are mutually
+/// exclusive (the first matching one wins — layering webp onto quantize
+/// onto jpeg only grows files); png-quantize only touches .png keys; jpeg
+/// conversion skips transparent inputs. Returns the new bytes and whether
+/// anything changed.
+pub fn apply_chain(
+    steps: &[Processor],
+    key: &str,
+    bytes: &[u8],
+    used_selectors: &std::collections::HashSet<String>,
+) -> (Vec<u8>, bool) {
+    let lower_key = key.to_lowercase();
+    let mut current = bytes.to_vec();
+    let mut image_step_taken = false;
+    for step in steps {
+        let applies = match step {
+            Processor::PngQuantize { .. } => lower_key.ends_with(".png"),
+            other => other.applies_to(crate::category::Category::from_key(&lower_key)),
+        };
+        if !applies {
+            continue;
+        }
+        if matches!(
+            step,
+            Processor::ImgWebp { .. } | Processor::ImgConvert { .. } | Processor::PngQuantize { .. }
+        ) {
+            if image_step_taken {
+                continue; // one image re-encode per resource
+            }
+            if let Processor::ImgConvert { format, .. } = step {
+                if format.eq_ignore_ascii_case("jpeg") && has_alpha_bytes(bytes) {
+                    continue;
+                }
+            }
+            image_step_taken = true;
+        }
+        if let Ok(out) = step.process(key, &current, used_selectors) {
+            current = out;
+        }
+    }
+    let changed = current != bytes;
+    (current, changed)
+}
+
+fn has_alpha_bytes(bytes: &[u8]) -> bool {
+    let Ok(img) = image::load_from_memory(bytes) else {
+        return false;
+    };
+    img.to_rgba8().pixels().any(|p| p.0[3] != 255)
+}
+
+/// Lossy WebP encode (alpha-safe). Keys keep their original extension —
+/// browsers sniff content, so `xxx.png` holding WebP bytes still renders.
+fn img_webp(input: &[u8], quality: Option<u8>) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(input).map_err(|e| e.to_string())?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let config =
+        webpx::EncoderConfig::new().quality(quality.unwrap_or(75).clamp(1, 100) as f32);
+    config
+        .encode_rgba(rgba.as_raw(), w, h, webpx::Unstoppable)
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// pngquant-style quantization: RGBA -> palette PNG with alpha (tRNS).
+fn png_quantize(input: &[u8], colors: Option<u32>) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(input).map_err(|e| e.to_string())?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut attrs = imagequant::Attributes::new();
+    attrs
+        .set_max_colors(colors.unwrap_or(256).clamp(2, 256))
+        .map_err(|e| format!("{e:?}"))?;
+    let pixels: Vec<imagequant::RGBA> = rgba
+        .pixels()
+        .map(|p| imagequant::RGBA {
+            r: p.0[0],
+            g: p.0[1],
+            b: p.0[2],
+            a: p.0[3],
+        })
+        .collect();
+    let mut liq_img = attrs
+        .new_image(pixels, w as usize, h as usize, 0.0)
+        .map_err(|e| format!("{e:?}"))?;
+    let mut quant = attrs.quantize(&mut liq_img).map_err(|e| format!("{e:?}"))?;
+    quant.set_dithering_level(1.0).map_err(|e| format!("{e:?}"))?;
+    let (palette, indexes) = quant.remapped(&mut liq_img).map_err(|e| format!("{e:?}"))?;
+    if palette.len() > 256 {
+        return Err("palette exceeded 256 entries".into());
+    }
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, w, h);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::High);
+        let mut flat = Vec::with_capacity(palette.len() * 3);
+        let mut trns = Vec::with_capacity(palette.len());
+        for c in &palette {
+            flat.extend_from_slice(&[c.r, c.g, c.b]);
+            trns.push(c.a);
+        }
+        encoder.set_palette(flat);
+        encoder.set_trns(trns);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer.write_image_data(&indexes).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Removes CSS rules whose `.class`/`#id` selectors never appear in the
+/// entry corpus. A selector survives when every class/id it mentions is in
+/// the corpus; selectors with no class/id at all (tag, `*`) are always kept.
+/// An empty corpus keeps everything.
+fn css_purge(input: &[u8], used: &std::collections::HashSet<String>) -> Result<Vec<u8>, String> {
+    if used.is_empty() {
+        return Ok(input.to_vec());
+    }
+    let mut stylesheet = match lightningcss::stylesheet::StyleSheet::parse(
+        std::str::from_utf8(input).map_err(|_| "css is not utf-8".to_string())?,
+        lightningcss::stylesheet::ParserOptions::default(),
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(input.to_vec()),
+    };
+    use lightningcss::rules::CssRule;
+    stylesheet
+        .rules
+        .0
+        .retain(|rule| match rule {
+            CssRule::Style(style) => style
+                .selectors
+                .0
+                .iter()
+                .all(|c| {
+                    use lightningcss::traits::ToCss;
+                    let mut buf = String::new();
+                    {
+                        let mut printer = lightningcss::printer::Printer::new(
+                            &mut buf,
+                            Default::default(),
+                        );
+                        if c.to_css(&mut printer).is_err() {
+                            return true; // cannot serialize — keep the rule
+                        }
+                    }
+                    selector_used(&buf, used)
+                }),
+            _ => true, // keep at-rules verbatim
+        });
+    match stylesheet.to_css(lightningcss::stylesheet::PrinterOptions {
+        minify: true,
+        ..Default::default()
+    }) {
+        Ok(out) => Ok(out.code.into_bytes()),
+        Err(_) => Ok(input.to_vec()),
+    }
+}
+
+fn selector_used(selector_text: &str, used: &std::collections::HashSet<String>) -> bool {
+    let mut chars = selector_text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '.' || c == '#' {
+            let mut name = String::new();
+            for n in chars.by_ref() {
+                if n.is_alphanumeric() || n == '-' || n == '_' {
+                    name.push(n);
+                } else {
+                    break;
+                }
+            }
+            if !name.is_empty() && !used.contains(&name) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn minify_css(input: &[u8]) -> Result<Vec<u8>, String> {

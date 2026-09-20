@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::category::Category;
 use crate::pipeline::JobCtl;
+use crate::processors;
 use crate::processors::Processor;
 use crate::registry::normalize_key;
 use crate::state::{current_bytes, InsertKind, Overlay, ResourceId, Source, SourcePool};
@@ -236,6 +237,8 @@ fn rebuild_mdd_source(
     let mut lossy_total = 0u64;
     let total = file.len();
     let mut seen = 0u64;
+    // Phase A — serial read (IO + block decode): collect (name, bytes).
+    let mut items: Vec<(String, Vec<u8>)> = Vec::new();
     for key in file.keys() {
         if (ctl.cancelled)() {
             return Err("已取消".into());
@@ -261,17 +264,33 @@ fn rebuild_mdd_source(
                 .bytes()
                 .to_vec(),
         };
-        let bytes = match lossy {
-            Some(steps) => {
-                lossy_total += 1;
-                let (out, changed) = apply_lossy(steps, &name, &raw);
-                if changed {
-                    lossy_changed += 1;
-                }
-                out
-            }
-            None => raw,
-        };
+        items.push((name, raw));
+    }
+
+    // Phase B — parallel lossy transform (CPU-bound; rayon keeps item order),
+    // then serial builder writes. One pass-through: image re-encodes never
+    // stack (see processors::apply_chain).
+    let transformed: Vec<(String, Vec<u8>)> = match lossy {
+        Some(steps) => {
+            lossy_total = items.len() as u64;
+            use rayon::prelude::*;
+            let changed_count = std::sync::atomic::AtomicU64::new(0);
+            let out: Vec<(String, Vec<u8>)> = items
+                .into_par_iter()
+                .map(|(name, raw)| {
+                    let (out, changed) = apply_lossy(steps, &name, &raw, ctl);
+                    if changed {
+                        changed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    (name, out)
+                })
+                .collect();
+            lossy_changed = changed_count.into_inner();
+            out
+        }
+        None => items,
+    };
+    for (name, bytes) in transformed {
         builder.add_resource(&name, &bytes).map_err(|e| e.to_string())?;
     }
 
@@ -296,7 +315,7 @@ fn rebuild_mdd_source(
         let bytes = match lossy {
             Some(steps) => {
                 lossy_total += 1;
-                let (out, changed) = apply_lossy(steps, &ins.name, &ins.bytes);
+                let (out, changed) = apply_lossy(steps, &ins.name, &ins.bytes, ctl);
                 if changed {
                     lossy_changed += 1;
                 }
@@ -359,40 +378,10 @@ fn rebuild_mdd_source(
     ))
 }
 
-/// Applies the lossy chain to one resource on the fly. A failing step keeps
-/// the previous bytes (lossy must never break the export). JPEG has no alpha
-/// channel, so transparent images skip JPEG conversion.
-fn apply_lossy(steps: &[Processor], key: &str, bytes: &[u8]) -> (Vec<u8>, bool) {
-    let mut current = bytes.to_vec();
-    for step in steps {
-        if !step.applies_to(Category::from_key(&normalize_key(key))) {
-            continue;
-        }
-        if let Processor::ImgConvert { format, .. } = step {
-            if format.eq_ignore_ascii_case("jpeg") && has_alpha(bytes) {
-                continue;
-            }
-        }
-        if let Ok(out) = step.process(key, &current) {
-            current = out;
-        }
-    }
-    let changed = current != bytes;
-    (current, changed)
-}
-
-/// True when the image bytes carry non-opaque alpha.
-fn has_alpha(bytes: &[u8]) -> bool {
-    let Ok(img) = image::load_from_memory(bytes) else {
-        return false;
-    };
-    match img {
-        image::DynamicImage::ImageRgba8(rgba) => rgba.pixels().any(|p| p.0[3] != 255),
-        _ => img
-            .to_rgba8()
-            .pixels()
-            .any(|p| p.0[3] != 255),
-    }
+/// Applies the lossy chain to one resource on the fly (shared semantics
+/// with the pipeline — see `processors::apply_chain`).
+fn apply_lossy(steps: &[Processor], key: &str, bytes: &[u8], ctl: &JobCtl) -> (Vec<u8>, bool) {
+    processors::apply_chain(steps, key, bytes, ctl.used_selectors)
 }
 
 /// Current content of all external files (overlay-aware), sorted by name.

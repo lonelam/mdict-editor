@@ -1,6 +1,7 @@
 //! Tauri command layer. All business logic lives in the sibling modules;
 //! these handlers only lock state, delegate and map errors to strings.
 
+pub mod assets;
 pub mod category;
 pub mod export;
 #[doc(hidden)]
@@ -32,6 +33,93 @@ where
     T: Serialize + 'static,
     F: FnOnce(&AppState, &JobCtl) -> Result<T, String> + Send + 'static,
 {
+    start_job_with_selectors(app, name, std::collections::HashSet::new(), work)
+}
+
+/// Collects class/id names actually used across all MDX entries — the
+/// corpus css-purge keeps rules against.
+fn collect_used_selectors(pool: &crate::state::SourcePool) -> std::collections::HashSet<String> {
+    let mut used = std::collections::HashSet::new();
+    for entry in pool.sources.iter().filter(|e| !e.tombstone) {
+        let crate::state::Source::Mdx(file) = &entry.source else {
+            continue;
+        };
+        for entry_item in file.entries() {
+            let Ok(entry_item) = entry_item else { continue };
+            collect_from_html(entry_item.text(), &mut used);
+        }
+    }
+    used
+}
+
+/// Extracts `class="a b"` and `id="x"` values (best-effort regex-free scan).
+fn collect_from_html(html: &str, used: &mut std::collections::HashSet<String>) {
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i + 6 < bytes.len() {
+        let lower_window: &[u8; 5] = match bytes[i..i + 5].try_into() {
+            Ok(w) => w,
+            Err(_) => break,
+        };
+        let is_class = lower_window.eq_ignore_ascii_case(b"class");
+        let is_id = !is_class
+            && bytes[i..i + 3].eq_ignore_ascii_case(b"id=")
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'-'));
+        if is_class || is_id {
+            let mut j = i + if is_class { 5 } else { 2 };
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'=') {
+                j += 1;
+            }
+            let quote = if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                j += 1;
+                Some(bytes[j - 1])
+            } else {
+                None
+            };
+            let start = j;
+            while j < bytes.len() {
+                let stop = match quote {
+                    Some(q) => bytes[j] == q,
+                    None => bytes[j].is_ascii_whitespace(),
+                };
+                if stop {
+                    break;
+                }
+                j += 1;
+            }
+            let value = &html[start..j.min(html.len())];
+            for token in value.split_whitespace() {
+                used.insert(token.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').to_string());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Entry-corpus selectors for css-purge; empty when the pool is locked.
+fn corpus_for(app: &AppHandle) -> std::collections::HashSet<String> {
+    let state = app.state::<AppState>();
+    let pool = match state.pool.read() {
+        Ok(pool) => pool,
+        Err(_) => return Default::default(),
+    };
+    collect_used_selectors(&pool)
+}
+
+/// Same as [`start_job`], carrying the entry-corpus selector set collected
+/// by the caller (css-purge input).
+fn start_job_with_selectors<T, F>(
+    app: &AppHandle,
+    name: &str,
+    used_selectors: std::collections::HashSet<String>,
+    work: F,
+) -> String
+where
+    T: Serialize + 'static,
+    F: FnOnce(&AppState, &JobCtl) -> Result<T, String> + Send + 'static,
+{
     let jobs = app.state::<Jobs>();
     let n = jobs.counter.fetch_add(1, Ordering::Relaxed);
     let id = format!("{name}-{}", n);
@@ -47,8 +135,11 @@ where
     // thousands of resources and an event per item floods the webview.
     let last_emit_ms = std::sync::Mutex::new(0u128);
     let clock = std::time::Instant::now();
+    let selectors = std::sync::Arc::new(used_selectors);
+    let selectors_ctl = std::sync::Arc::clone(&selectors);
     std::thread::spawn(move || {
         let state = app_progress.state::<AppState>();
+        let selectors_ref: &std::collections::HashSet<String> = &selectors_ctl;
         let ctl = JobCtl {
             progress: &|done, total, item| {
                 let now = clock.elapsed().as_millis();
@@ -65,6 +156,7 @@ where
                 );
             },
             cancelled: &|| flag.load(Ordering::Relaxed),
+            used_selectors: selectors_ref,
         };
         let (ok, value, error) = match work(&state, &ctl) {
             Ok(value) => (true, Some(serde_json::to_value(&value).ok()), None),
@@ -594,6 +686,21 @@ fn serve_resolved(state: &AppState, rel: &str, ctx: Option<&ResourceId>) -> taur
         Ok(r) => r,
         Err(_) => return not_found("state poisoned"),
     };
+    // AALookup parity: a safe file beside the source dictionary wins over
+    // same-named MDD resources.
+    if let Some(bytes) = assets::loose_file_lookup(&pool, &overlay, ctx, rel) {
+        let mime = std::path::Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| crate::category::Category::mime_for(&format!("x.{e}")))
+            .unwrap_or("application/octet-stream");
+        return tauri::http::Response::builder()
+            .status(200)
+            .header("Content-Type", mime)
+            .header("Cache-Control", "no-store")
+            .body(bytes)
+            .unwrap();
+    }
     let resolved = match resolver::resolve_path(&pool, &registry, rel, ctx) {
         Ok(resolver::ResolveOutcome::Found { target, .. }) => Some(target),
         Ok(resolver::ResolveOutcome::Ambiguous { candidates, .. }) => {
@@ -649,7 +756,15 @@ fn pipeline_dry_run_start(
     scope: pipeline::Scope,
     app: AppHandle,
 ) -> String {
-    start_job(&app, "pipeline-dry", move |st, ctl| {
+    let needs_corpus = steps
+        .iter()
+        .any(|s| matches!(s, processors::Processor::CssPurge));
+    let selectors = if needs_corpus {
+corpus_for(&app)
+    } else {
+        Default::default()
+    };
+    start_job_with_selectors(&app, "pipeline-dry", selectors, move |st, ctl| {
         // Snapshot phase (short-lived locks): build indices + select targets,
         // then drop the registry lock before the long walk so the preview
         // protocol and UI reads never wait on us.
@@ -673,7 +788,15 @@ fn pipeline_apply_start(
     scope: pipeline::Scope,
     app: AppHandle,
 ) -> String {
-    start_job(&app, "pipeline-apply", move |st, ctl| {
+    let needs_corpus = steps
+        .iter()
+        .any(|s| matches!(s, processors::Processor::CssPurge));
+    let selectors = if needs_corpus {
+corpus_for(&app)
+    } else {
+        Default::default()
+    };
+    start_job_with_selectors(&app, "pipeline-apply", selectors, move |st, ctl| {
         let metas = {
             let pool = st.pool.read().map_err(|e| e.to_string())?;
             let overlay = st.overlay.read().map_err(|e| e.to_string())?;
@@ -698,7 +821,16 @@ fn pipeline_apply_start(
 /// Starts an export job; outputs land in `config.out_dir`.
 #[tauri::command]
 fn export_start(config: export::ExportConfig, app: AppHandle) -> String {
-    start_job(&app, "export", move |st, ctl| {
+    let needs_corpus = config
+        .lossy
+        .as_ref()
+        .is_some_and(|steps| steps.iter().any(|s| matches!(s, processors::Processor::CssPurge)));
+    let selectors = if needs_corpus {
+corpus_for(&app)
+    } else {
+        Default::default()
+    };
+    start_job_with_selectors(&app, "export", selectors, move |st, ctl| {
         let pool = st.pool.read().map_err(|e| e.to_string())?;
         let overlay = st.overlay.read().map_err(|e| e.to_string())?;
         export::export_build(&pool, &overlay, &config, ctl)

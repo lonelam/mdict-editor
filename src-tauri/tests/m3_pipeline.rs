@@ -1,7 +1,7 @@
 //! M3 integration tests: processors and pipeline dry-run/apply semantics.
 
 use mdict_editor_lib::fixtures;
-use mdict_editor_lib::pipeline::{self, NO_CTL, Scope};
+use mdict_editor_lib::pipeline::{self, Scope, no_ctl};
 use mdict_editor_lib::processors::Processor;
 use mdict_editor_lib::registry::{self, Registry};
 use mdict_editor_lib::state::{AppState, ResourceId, SourcePool};
@@ -24,7 +24,7 @@ fn setup() -> (tempfile::TempDir, AppState) {
 #[test]
 fn minify_css_strips_whitespace() {
     let input = b"/* header */\n.entry {\n  color:   #123456;\n  margin: 0 auto;\n}\n";
-    let out = Processor::MinifyCss.process("a.css", input).unwrap();
+    let out = Processor::MinifyCss.process("a.css", input, &Default::default()).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.len() < input.len());
     assert!(text.contains(".entry"));
@@ -41,7 +41,7 @@ function addNumbers(firstValue, secondValue) {
   return resultTotal;
 }
 "#;
-    let out = Processor::MinifyJs.process("a.js", input).unwrap();
+    let out = Processor::MinifyJs.process("a.js", input, &Default::default()).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.len() < input.len(), "should shrink: {text}");
     assert!(!text.contains("addNumbers"), "mangled: {text}");
@@ -51,7 +51,7 @@ function addNumbers(firstValue, secondValue) {
 #[test]
 fn minify_html_strips_whitespace() {
     let input = b"<div  class=\"entry\" >\n  <p>hello</p>\n</div>\n";
-    let out = Processor::MinifyHtml.process("a.html", input).unwrap();
+    let out = Processor::MinifyHtml.process("a.html", input, &Default::default()).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.len() < input.len());
     assert!(text.contains("<p>hello</p>"));
@@ -77,7 +77,7 @@ fn png_optimize_and_resize_and_convert() {
         width: Some(64),
         height: None,
     }
-    .process("t.png", &bytes)
+    .process("t.png", &bytes, &Default::default())
     .unwrap();
     let dim = image::load_from_memory(&resized).unwrap();
     assert_eq!((dim.width(), dim.height()), (64, 32), "aspect ratio kept");
@@ -87,7 +87,7 @@ fn png_optimize_and_resize_and_convert() {
         format: "jpeg".into(),
         quality: Some(60),
     }
-    .process("t.png", &bytes)
+    .process("t.png", &bytes, &Default::default())
     .unwrap();
     assert_eq!(
         image::guess_format(&jpg).unwrap(),
@@ -97,7 +97,7 @@ fn png_optimize_and_resize_and_convert() {
     // PNG optimization: gradient png may not shrink; require success and
     // valid png output.
     let opt = Processor::PngOptimize { level: Some(2) }
-        .process("t.png", &bytes)
+        .process("t.png", &bytes, &Default::default())
         .unwrap();
     assert_eq!(image::guess_format(&opt).unwrap(), image::ImageFormat::Png);
 
@@ -106,7 +106,7 @@ fn png_optimize_and_resize_and_convert() {
         width: None,
         height: None
     }
-    .process("t.png", &bytes)
+    .process("t.png", &bytes, &Default::default())
     .is_err());
 }
 
@@ -127,7 +127,8 @@ fn pipeline_dry_run_reports_without_writing() {
             all: true,
             ..Default::default()
         },
-    &NO_CTL)
+        &no_ctl(),
+    )
     .unwrap();
 
     let ok_rows: Vec<_> = reports.iter().filter(|r| r.status == "ok").collect();
@@ -156,8 +157,9 @@ fn pipeline_apply_writes_overlay_and_reverts() {
             &mut registry,
             &[Processor::MinifyCss, Processor::MinifyJs],
             &scope_all,
-        &NO_CTL)
-        .unwrap();
+        &no_ctl(),
+    )
+    .unwrap();
         let applied: Vec<_> = reports.iter().filter(|r| r.status == "ok").collect();
         assert_eq!(applied.len(), 5);
     }
@@ -204,7 +206,8 @@ fn pipeline_per_item_errors_do_not_break_batch() {
             ]),
             ..Default::default()
         },
-    &NO_CTL)
+        &no_ctl(),
+    )
     .unwrap();
     assert_eq!(reports.len(), 3);
     assert!(reports[0].status == "ok" || reports[0].status == "skip");
@@ -227,7 +230,8 @@ fn pipeline_empty_processor_set_skips_everything() {
             ids: Some(vec![ResourceId::Mdd { source: 1, ordinal: 8 }]),
             ..Default::default()
         },
-    &NO_CTL)
+        &no_ctl(),
+    )
     .unwrap();
     assert_eq!(reports[0].status, "skip");
 }

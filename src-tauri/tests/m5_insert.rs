@@ -3,7 +3,7 @@
 
 use mdict_editor_lib::export::{export_build, ExportConfig};
 use mdict_editor_lib::fixtures;
-use mdict_editor_lib::pipeline::NO_CTL;
+use mdict_editor_lib::pipeline::no_ctl;
 use mdict_editor_lib::registry::{self, Registry};
 use mdict_editor_lib::state::{AppState, InsertKind, Overlay, SourcePool};
 
@@ -49,7 +49,7 @@ fn insert_entry_materializes_at_export() {
             mdx: true,
             ..Default::default()
         },
-        &NO_CTL,
+        &no_ctl(),
     )
     .unwrap();
     let file = &report.files[0];
@@ -101,7 +101,7 @@ fn insert_resource_materializes_with_lossy_chain() {
             }]),
             ..Default::default()
         },
-        &NO_CTL,
+        &no_ctl(),
     )
     .unwrap();
     // .edited rebuild (insertion counts as edit) + .lossy copy.
@@ -189,7 +189,7 @@ fn remove_insertion_restores_clean_export() {
             only_edited: true,
             ..Default::default()
         },
-        &NO_CTL,
+        &no_ctl(),
     )
     .unwrap();
     assert!(!report.files[0].check_ok);

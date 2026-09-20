@@ -318,3 +318,42 @@ fn mdres_root_absolute_deleted_and_edited() {
     assert_eq!(resp.status(), 200);
     assert!(resp.body().starts_with(b"/* edited */"));
 }
+
+/// AALookup parity: a file beside the source dictionary wins over a
+/// same-named MDD resource.
+#[test]
+fn mdres_loose_file_beside_source_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mdx, mdd, _, _) = fixtures::write_all(dir.path());
+    // Disk copy of css/style.css beside the mdx — must beat the MDD copy.
+    let loose = dir.path().join("css").join("style.css");
+    std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
+    std::fs::write(&loose, b"/* disk copy wins */").unwrap();
+
+    let state = AppState::default();
+    {
+        let mut pool = state.pool.write().unwrap();
+        for p in [&mdx, &mdd] {
+            pool.sources.push(SourcePool::open_path(p).unwrap());
+        }
+    }
+    {
+        let pool = state.pool.read().unwrap();
+        let mut registry = state.registry.write().unwrap();
+        registry::ensure_built(&pool, &mut registry).unwrap();
+    }
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-4/css/style.css");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.body(), b"/* disk copy wins */");
+}
+
+/// Traversal spellings never reach the filesystem.
+#[test]
+fn loose_path_traversal_rejected() {
+    use mdict_editor_lib::assets::loose_asset_relative_path;
+    assert!(loose_asset_relative_path("../secret.txt").is_err());
+    assert!(loose_asset_relative_path("/abs.txt").is_err());
+    assert!(loose_asset_relative_path("a/../../x").is_err());
+    assert!(loose_asset_relative_path("COM1.txt").is_err());
+    assert!(loose_asset_relative_path("a/b.png").is_ok());
+}
