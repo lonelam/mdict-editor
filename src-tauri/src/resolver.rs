@@ -85,9 +85,16 @@ fn exact_hits(
     registry: &Registry,
     lower: &str,
 ) -> Vec<ResourceId> {
+    // External (disk) files win over same-named MDD resources: the disk copy
+    // is what the user is editing. Two passes keep per-source order stable.
     let mut hits = Vec::new();
+    for want_ext in [true, false] {
     for (idx, entry) in pool.sources.iter().enumerate() {
-        if entry.tombstone || !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
+        let is_ext = matches!(entry.source, Source::External { .. });
+        if entry.tombstone
+            || !matches!(entry.source, Source::Mdd(_) | Source::External { .. })
+            || is_ext != want_ext
+        {
             continue;
         }
         let Some(Some(index)) = registry.indices.get(idx) else {
@@ -113,6 +120,7 @@ fn exact_hits(
             });
         }
     }
+    }
     hits
 }
 
@@ -124,8 +132,13 @@ fn suffix_hits(
     suffix: &str,
 ) -> (Vec<ResourceId>, Vec<String>) {
     let mut ids = Vec::new();
+    for want_ext in [true, false] {
     for (idx, entry) in pool.sources.iter().enumerate() {
-        if entry.tombstone || !matches!(entry.source, Source::Mdd(_) | Source::External { .. }) {
+        let is_ext = matches!(entry.source, Source::External { .. });
+        if entry.tombstone
+            || !matches!(entry.source, Source::Mdd(_) | Source::External { .. })
+            || is_ext != want_ext
+        {
             continue;
         }
         let Some(Some(index)) = registry.indices.get(idx) else {
@@ -145,6 +158,7 @@ fn suffix_hits(
                 break;
             }
         }
+    }
     }
     let keys = ids
         .iter()

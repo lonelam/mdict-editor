@@ -377,7 +377,12 @@ fn delete_resource(id: ResourceId, state: tauri::State<AppState>) -> Result<(), 
 /// load it globally. The preview reproduces that by injecting `<link>` tags
 /// for every loaded CSS (external files first, then MDD css resources) into
 /// MDX entry HTML, skipping stylesheets the entry already references.
-fn inject_preview_css(pool: &SourcePool, registry: &Registry, html: &[u8]) -> Vec<u8> {
+fn inject_preview_css(
+    pool: &SourcePool,
+    overlay: &Overlay,
+    registry: &Registry,
+    html: &[u8],
+) -> Vec<u8> {
     let text = match std::str::from_utf8(html) {
         Ok(t) => t,
         Err(_) => return html.to_vec(),
@@ -394,17 +399,26 @@ fn inject_preview_css(pool: &SourcePool, registry: &Registry, html: &[u8]) -> Ve
                     .and_then(|e| e.to_str())
                     .is_some_and(|e| e.eq_ignore_ascii_case("css"));
                 if is_css {
-                    if let Ok(name) = pool.key_of(&ResourceId::Ext { file: idx as u32 }) {
-                        links.push(name);
+                    let id = ResourceId::Ext { file: idx as u32 };
+                    if overlay.get(&id).is_some_and(|r| !r.deleted) {
+                        if let Ok(name) = pool.key_of(&id) {
+                            links.push(name);
+                        }
                     }
                 }
             }
             crate::state::Source::Mdd(file) => {
                 // Original-case hrefs: one representative key per css name.
-                if let Some(Some(_)) = registry.indices.get(idx) {
+                if registry.indices.get(idx).is_some_and(|o| o.is_some()) {
                     for key in file.keys().flatten() {
                         if key.key().to_lowercase().ends_with(".css") {
-                            links.push(key.key().to_string());
+                            let id = ResourceId::Mdd {
+                                source: idx as u32,
+                                ordinal: key.ordinal().get(),
+                            };
+                            if overlay.get(&id).is_some_and(|r| !r.deleted) {
+                                links.push(key.key().to_string());
+                            }
                         }
                     }
                 }
@@ -485,8 +499,10 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
         .decode_utf8_lossy()
         .into_owned();
     let path = decoded.trim_start_matches('/');
+    // Root-absolute references (`src="/arts/x.png"`) bypass the iframe's
+    // /preview/<token>/ base entirely — resolve them against the root.
     let Some(rest) = path.strip_prefix("preview/") else {
-        return not_found("expected /preview/<token>/<path>");
+        return serve_resolved(&state, path, None);
     };
     let (token, rel) = match rest.split_once('/') {
         Some((t, r)) => (t, r),
@@ -508,6 +524,58 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
         _ => return not_found("bad preview token"),
     };
 
+    // Empty rel = the context resource itself (MDX entry HTML preview),
+    // with companion CSS auto-injected so the preview looks like a reader.
+    // All locks are scoped and dropped before serve_resolved takes its own.
+    {
+        let pool = match state.pool.read() {
+            Ok(p) => p,
+            Err(_) => return not_found("state poisoned"),
+        };
+        let overlay = match state.overlay.read() {
+            Ok(o) => o,
+            Err(_) => return not_found("state poisoned"),
+        };
+        {
+            let mut registry = match state.registry.write() {
+                Ok(r) => r,
+                Err(_) => return not_found("state poisoned"),
+            };
+            if registry::ensure_built(&pool, &mut registry).is_err() {
+                return not_found("registry build failed");
+            }
+        }
+        let registry = match state.registry.read() {
+            Ok(r) => r,
+            Err(_) => return not_found("state poisoned"),
+        };
+        if rel.is_empty() {
+            let bytes = match state::current_bytes(&pool, &overlay, &ctx) {
+                Ok(b) => b,
+                Err(e) => return not_found(&e),
+            };
+            if matches!(ctx, ResourceId::Mdx { .. }) {
+                let bytes = inject_preview_css(&pool, &overlay, &registry, &bytes);
+                return ok("text/html; charset=utf-8", bytes);
+            }
+            return ok("text/html; charset=utf-8", bytes);
+        }
+    }
+
+    serve_resolved(&state, rel, Some(&ctx))
+}
+
+/// Shared resolution for preview and root-absolute requests: ambiguous keys
+/// serve the first (external-first) hit; resources marked deleted 404; the
+/// overlay's current bytes win for edited resources.
+fn serve_resolved(state: &AppState, rel: &str, ctx: Option<&ResourceId>) -> tauri::http::Response<Vec<u8>> {
+    let not_found = |msg: &str| {
+        tauri::http::Response::builder()
+            .status(404)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(msg.as_bytes().to_vec())
+            .unwrap()
+    };
     let pool = match state.pool.read() {
         Ok(p) => p,
         Err(_) => return not_found("state poisoned"),
@@ -516,55 +584,34 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
         Ok(o) => o,
         Err(_) => return not_found("state poisoned"),
     };
-    // Index building needs a short write lock; drop to a read lock right
-    // after so preview requests never hold writers (or wait on them).
-    {
-        let mut registry = match state.registry.write() {
-            Ok(r) => r,
-            Err(_) => return not_found("state poisoned"),
-        };
-        if registry::ensure_built(&pool, &mut registry).is_err() {
-            return not_found("registry build failed");
-        }
-    }
     let registry = match state.registry.read() {
         Ok(r) => r,
         Err(_) => return not_found("state poisoned"),
     };
-
-    // Empty rel = the context resource itself (MDX entry HTML preview),
-    // with companion CSS auto-injected so the preview looks like a reader.
-    if rel.is_empty() {
-        let bytes = match state::current_bytes(&pool, &overlay, &ctx) {
-            Ok(b) => b,
-            Err(e) => return not_found(&e),
-        };
-        if matches!(ctx, ResourceId::Mdx { .. }) {
-            let bytes = inject_preview_css(&pool, &registry, &bytes);
-            return ok("text/html; charset=utf-8", bytes);
-        }
-        return ok("text/html; charset=utf-8", bytes);
-    }
-
-    // Preview resolution is best-effort: an ambiguous key (the same name in
-    // an MDD and as an external file — common when authors shipped the css
-    // both ways) serves the first hit instead of 404ing.
-    let resolved = match resolver::resolve_path(&pool, &registry, rel, Some(&ctx)) {
+    let resolved = match resolver::resolve_path(&pool, &registry, rel, ctx) {
         Ok(resolver::ResolveOutcome::Found { target, .. }) => Some(target),
         Ok(resolver::ResolveOutcome::Ambiguous { candidates, .. }) => {
             candidates.into_iter().next()
         }
         _ => None,
     };
-    match resolved {
-        Some(target) => match state::current_bytes(&pool, &overlay, &target) {
-            Ok(bytes) => {
-                let key = pool.key_of(&target).unwrap_or_default();
-                ok(crate::category::Category::mime_for(&key), bytes)
-            }
-            Err(e) => not_found(&e),
-        },
-        None => not_found("resource not found"),
+    let Some(target) = resolved else {
+        return not_found("resource not found");
+    };
+    if overlay.get(&target).is_some_and(|r| r.deleted) {
+        return not_found("resource deleted");
+    }
+    match state::current_bytes(&pool, &overlay, &target) {
+        Ok(bytes) => {
+            let key = pool.key_of(&target).unwrap_or_default();
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", crate::category::Category::mime_for(&key))
+                .header("Cache-Control", "no-store")
+                .body(bytes)
+                .unwrap()
+        }
+        Err(e) => not_found(&e),
     }
 }
 

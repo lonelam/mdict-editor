@@ -243,3 +243,78 @@ fn resolve_path_public_api_sound() {
     let (t, _) = found_of(resolve_path(&pool, &registry, "/audio/hello.wav", None).unwrap());
     assert_eq!(t, ResourceId::Mdd { source: 1, ordinal: 0 });
 }
+
+/// Disk-loaded (external) files win over same-named MDD keys.
+#[test]
+fn external_source_takes_priority_over_mdd() {
+    // Mdd with \img\logo.png — same normalized key as the ext css pair below.
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = mdictlib::MddBuilder::new();
+    b.add_resource("\\ahd3e.css", b"mdd copy".as_slice()).unwrap();
+    b.add_resource("\\style-ext.css", b"mdd copy".as_slice()).unwrap();
+    let mut bytes = Vec::new();
+    b.finish(&mut bytes).unwrap();
+    let p = dir.path().join("dup.mdd");
+    std::fs::write(&p, &bytes).unwrap();
+
+    let env = setup();
+    env.state
+        .pool
+        .write()
+        .unwrap()
+        .sources
+        .push(SourcePool::open_path(p.to_str().unwrap()).unwrap());
+    {
+        let pool = env.state.pool.read().unwrap();
+        let mut registry = env.state.registry.write().unwrap();
+        registry::ensure_built(&pool, &mut registry).unwrap();
+    }
+    // style-ext.css is an ext source; ahd3e.css exists only in the mdd — but
+    // css/style.css (mdd) vs nothing external: check the ambiguous pair by
+    // resolving "ahd3e.css" — wait, no ext file named ahd3e.css exists in
+    // fixtures; use style-ext.css vs a same-key mdd resource instead.
+    let pool = env.state.pool.read().unwrap();
+    let registry = env.state.registry.read().unwrap();
+    // Ambiguity ordering: first candidate must be the ext source (id 2).
+    match resolve(&pool, &registry, "style-ext.css", None).unwrap() {
+        ResolveOutcome::Ambiguous { candidates, keys } => {
+            assert!(matches!(candidates[0], ResourceId::Ext { file: 2 }), "{candidates:?}");
+            assert_eq!(keys[0], "style-ext.css");
+            assert!(matches!(candidates[1], ResourceId::Mdd { .. }), "{candidates:?}");
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+/// Root-absolute preview URLs (`src="/img/logo.png"` bypasses the iframe
+/// base) resolve through the same serve path; deleted resources 404; edited
+/// resources serve overlay bytes.
+#[test]
+fn mdres_root_absolute_deleted_and_edited() {
+    let env = setup();
+    // Root-absolute, no /preview/ prefix.
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/img/logo.png");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["Content-Type"], "image/png");
+
+    // Mark deleted → 404.
+    let logo = ResourceId::Mdd { source: 1, ordinal: 7 };
+    env.state
+        .overlay
+        .write()
+        .unwrap()
+        .delete(logo.clone(), env.state.pool.read().unwrap().read_original(&logo).unwrap());
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/img/logo.png");
+    assert_eq!(resp.status(), 404);
+
+    // Edited mdd css served from the overlay.
+    let style = ResourceId::Mdd { source: 1, ordinal: 2 };
+    env.state
+        .overlay
+        .write()
+        .unwrap()
+        .write(style.clone(), vec![], b"/* edited */ .x{}".to_vec());
+    let resp = mdict_editor_lib::handle_mdres_request(&env.state, "/preview/mdx-0-4/css/style.css");
+    assert_eq!(resp.status(), 200);
+    assert!(resp.body().starts_with(b"/* edited */"));
+}
