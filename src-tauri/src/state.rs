@@ -226,10 +226,31 @@ pub struct Revision {
 /// Maximum in-memory versions per resource (oldest dropped).
 const HISTORY_CAP: usize = 32;
 
+/// A pending insertion: a new entry (MDX) or resource (MDD) materialized at
+/// export time (`EditSet::insert` / `MddBuilder::add_resource`).
+#[derive(Clone)]
+pub struct Insertion {
+    /// Source index the insertion targets (must be mdx for Entry, mdd for
+    /// Resource).
+    pub target: u32,
+    pub kind: InsertKind,
+    /// Entry head / resource path.
+    pub name: String,
+    /// Entry body (UTF-8 HTML) / resource bytes.
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InsertKind {
+    Entry,
+    Resource,
+}
+
 /// The overlay: every edit lands here; source files are never touched.
 #[derive(Default)]
 pub struct Overlay {
     pub revisions: HashMap<ResourceId, Revision>,
+    pub insertions: Vec<Insertion>,
 }
 
 impl Overlay {

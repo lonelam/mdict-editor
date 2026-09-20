@@ -70,6 +70,30 @@ export const exportStart = (config: ExportConfig) =>
   invoke<string>("export_start", { config });
 export const cancelJob = (job: string) => invoke<boolean>("cancel_job", { job });
 
+export interface InsertionInfo {
+  index: number;
+  kind: "entry" | "resource";
+  name: string;
+  target: number;
+  size: number;
+}
+
+export const insertEntry = (source: number, key: string, html: string) =>
+  invoke<number>("insert_entry", { source, key, html });
+
+/** Returns [addedCount, perFileErrors]. */
+export const insertResources = (source: number, paths: string[]) =>
+  invoke<[number, string[]]>("insert_resources", { source, paths });
+
+export const listInsertions = (source: number | null) =>
+  invoke<InsertionInfo[]>("list_insertions", { source: source ?? null });
+
+export const updateInsertion = (index: number, html: string) =>
+  invoke<void>("update_insertion", { index, html });
+
+export const removeInsertion = (index: number) =>
+  invoke<boolean>("remove_insertion", { index });
+
 export async function resourceStats(source: number | null): Promise<CategoryStat[]> {
   return invoke("resource_stats", { source });
 }

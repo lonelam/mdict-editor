@@ -108,20 +108,6 @@ struct RevisionInfo {
     size_current: u64,
 }
 
-fn source_infos(pool: &SourcePool) -> Vec<SourceInfo> {
-    pool.sources
-        .iter()
-        .enumerate()
-        .map(|(id, e)| SourceInfo {
-            id: id as u32,
-            kind: e.kind(),
-            name: e.name.clone(),
-            title: e.title.clone(),
-            entry_count: e.entry_count(),
-        })
-        .collect()
-}
-
 /// Locks pool + registry, ensures indices, runs `f`.
 fn with_registry<T>(
     state: &AppState,
@@ -518,6 +504,189 @@ fn export_start(config: export::ExportConfig, app: AppHandle) -> String {
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InsertionInfo {
+    index: usize,
+    /// "entry" | "resource"
+    kind: &'static str,
+    name: String,
+    target: u32,
+    size: u64,
+}
+
+use crate::state::InsertKind;
+
+fn insertion_kind_str(kind: InsertKind) -> &'static str {
+    match kind {
+        InsertKind::Entry => "entry",
+        InsertKind::Resource => "resource",
+    }
+}
+
+/// Inserts a new dictionary entry into an MDX source (materialized at export
+/// via `EditSet::insert`). Rejects empty keys and duplicates against both
+/// existing entries and pending insertions.
+#[tauri::command]
+fn insert_entry(
+    source: u32,
+    key: String,
+    html: String,
+    state: tauri::State<AppState>,
+) -> Result<usize, String> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err("词条词头不能为空".into());
+    }
+    let pool = state.pool.lock().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let entry = pool.get(&ResourceId::Mdx {
+        source,
+        ordinal: 0,
+    })?;
+    if !matches!(entry.source, crate::state::Source::Mdx(_)) {
+        return Err(format!("{} 不是 MDX 源", entry.name));
+    }
+    registry::ensure_built(&pool, &mut registry)?;
+    let lower = key.to_lowercase();
+    if let Some(index) = registry.indices.get(source as usize).and_then(|o| o.as_ref()) {
+        if index.rows.iter().any(|(k, _)| k == &lower) {
+            return Err(format!("词条 {key:?} 已存在于 {}", entry.name));
+        }
+    }
+    if overlay
+        .insertions
+        .iter()
+        .any(|i| i.target == source && i.kind == InsertKind::Entry && i.name.to_lowercase() == lower)
+    {
+        return Err(format!("待插入列表中已有词条 {key:?}"));
+    }
+    overlay.insertions.push(crate::state::Insertion {
+        target: source,
+        kind: InsertKind::Entry,
+        name: key,
+        bytes: html.into_bytes(),
+    });
+    Ok(overlay.insertions.len() - 1)
+}
+
+/// Inserts resource files into an MDD source. `paths` are read server-side;
+/// names come from the file names (leading separators stripped). Duplicate
+/// keys are rejected; per-file errors do not abort the batch.
+#[tauri::command]
+fn insert_resources(
+    source: u32,
+    paths: Vec<String>,
+    state: tauri::State<AppState>,
+) -> Result<(usize, Vec<String>), String> {
+    let pool = state.pool.lock().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let entry = pool.get(&ResourceId::Mdd {
+        source,
+        ordinal: 0,
+    })?;
+    if !matches!(entry.source, crate::state::Source::Mdd(_)) {
+        return Err(format!("{} 不是 MDD 源", entry.name));
+    }
+    registry::ensure_built(&pool, &mut registry)?;
+    let mut added = 0usize;
+    let mut errors = Vec::new();
+    for path in paths {
+        let p = std::path::Path::new(&path);
+        let name = match p.file_name() {
+            Some(n) => n.to_string_lossy().replace('\\', "/"),
+            None => {
+                errors.push(format!("invalid path: {path}"));
+                continue;
+            }
+        };
+        let normalized = registry::normalize_key(&name);
+        let dup_source = registry
+            .indices
+            .get(source as usize)
+            .and_then(|o| o.as_ref())
+            .map(|index| index.rows.iter().any(|(k, _)| k == &normalized))
+            .unwrap_or(false);
+        let dup_pending = overlay.insertions.iter().any(|i| {
+            i.target == source
+                && i.kind == InsertKind::Resource
+                && registry::normalize_key(&i.name) == normalized
+        });
+        if dup_source || dup_pending {
+            errors.push(format!("{name}: 键已存在，跳过"));
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                overlay.insertions.push(crate::state::Insertion {
+                    target: source,
+                    kind: InsertKind::Resource,
+                    name,
+                    bytes,
+                });
+                added += 1;
+            }
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+    Ok((added, errors))
+}
+
+/// Lists pending insertions (optionally filtered by target source).
+#[tauri::command]
+fn list_insertions(
+    source: Option<u32>,
+    state: tauri::State<AppState>,
+) -> Result<Vec<InsertionInfo>, String> {
+    let overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    Ok(overlay
+        .insertions
+        .iter()
+        .filter(|i| source.is_none_or(|s| i.target == s))
+        .enumerate()
+        .map(|(index, i)| InsertionInfo {
+            index,
+            kind: insertion_kind_str(i.kind),
+            name: i.name.clone(),
+            target: i.target,
+            size: i.bytes.len() as u64,
+        })
+        .collect())
+}
+
+/// Updates an entry insertion's HTML body (index-based; removing shifts ids,
+/// the UI refreshes the list right after any mutation).
+#[tauri::command]
+fn update_insertion(
+    index: usize,
+    html: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    let ins = overlay
+        .insertions
+        .get_mut(index)
+        .ok_or_else(|| format!("插入项 {index} 不存在"))?;
+    if ins.kind != InsertKind::Entry {
+        return Err("仅词条插入可编辑文本".into());
+    }
+    ins.bytes = html.into_bytes();
+    Ok(())
+}
+
+/// Removes a pending insertion (swap-remove; UI refreshes indices after).
+#[tauri::command]
+fn remove_insertion(index: usize, state: tauri::State<AppState>) -> Result<bool, String> {
+    let mut overlay = state.overlay.lock().map_err(|e| e.to_string())?;
+    if index >= overlay.insertions.len() {
+        return Err(format!("插入项 {index} 不存在"));
+    }
+    overlay.insertions.remove(index);
+    Ok(true)
+}
+
 /// Flags a running job for cancellation between items.
 #[tauri::command]
 fn cancel_job(job: String, app: AppHandle) -> bool {
@@ -536,6 +705,7 @@ fn cancel_job(job: String, app: AppHandle) -> bool {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .manage(Jobs::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -553,12 +723,23 @@ pub fn run() {
             pipeline_dry_run_start,
             pipeline_apply_start,
             export_start,
-            cancel_job
+            cancel_job,
+            insert_entry,
+            insert_resources,
+            list_insertions,
+            update_insertion,
+            remove_insertion
         ])
         .register_uri_scheme_protocol("mdres", |ctx, request| {
             use tauri::Manager;
-            let state = ctx.app_handle().state::<AppState>();
-            handle_mdres_request(&state, request.uri().path())
+            match ctx.app_handle().try_state::<AppState>() {
+                Some(state) => handle_mdres_request(&state, request.uri().path()),
+                None => tauri::http::Response::builder()
+                    .status(503)
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body("state not ready".as_bytes().to_vec())
+                    .unwrap(),
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

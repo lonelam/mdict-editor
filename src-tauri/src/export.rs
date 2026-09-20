@@ -12,7 +12,7 @@ use crate::category::Category;
 use crate::pipeline::JobCtl;
 use crate::processors::Processor;
 use crate::registry::normalize_key;
-use crate::state::{current_bytes, Overlay, ResourceId, Source, SourcePool};
+use crate::state::{current_bytes, InsertKind, Overlay, ResourceId, Source, SourcePool};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -87,7 +87,12 @@ fn rebuild_mdx_source(
         return Err("not an mdx source".into());
     };
     let edits_map = overlay_edits_for(overlay, |id| matches!(id, ResourceId::Mdx { source, .. } if *source as usize == src_idx));
-    if edits_map.is_empty() {
+    let insertions: Vec<&crate::state::Insertion> = overlay
+        .insertions
+        .iter()
+        .filter(|i| i.target as usize == src_idx && i.kind == InsertKind::Entry)
+        .collect();
+    if edits_map.is_empty() && insertions.is_empty() {
         return Ok(ExportedFile {
             path: out_path.display().to_string(),
             entries: 0,
@@ -130,6 +135,13 @@ fn rebuild_mdx_source(
         }
     }
 
+    let mut inserted = 0u64;
+    for ins in &insertions {
+        let body = String::from_utf8_lossy(&ins.bytes).into_owned();
+        edits.insert(ins.name.clone(), body);
+        inserted += 1;
+    }
+
     let options = mdictlib::WriteOptions::new()
         .with_encoding(mdictlib::WriteEncoding::Utf8)
         .with_compression(mdictlib::WriteCompression::Zlib);
@@ -140,13 +152,27 @@ fn rebuild_mdx_source(
     // Self-check: reopen, compare counts, spot-check the first edited entry.
     let reopened = mdictlib::MdxFile::open(out_path).map_err(|e| format!("reopen failed: {e}"))?;
     let mut message = String::new();
-    let mut check_ok = reopened.len() == summary.entries && summary.entries + deleted == file.len();
+    let mut check_ok =
+        reopened.len() == summary.entries && summary.entries + deleted == file.len() + inserted;
     if !check_ok {
         message.push_str(&format!(
             "count mismatch: rebuilt {} (deleted {deleted}) vs source {}",
             reopened.len(),
             file.len()
         ));
+    }
+    if let Some(ins) = insertions.first() {
+        match reopened.lookup(&ins.name) {
+            Ok(Some(entry)) if entry.text().as_bytes() == ins.bytes.as_slice() => {}
+            Ok(_) => {
+                check_ok = false;
+                message.push_str(&format!("insert spot-check failed for {:?}", ins.name));
+            }
+            Err(e) => {
+                check_ok = false;
+                message.push_str(&format!("insert lookup failed: {e}"));
+            }
+        }
     }
     if let Some((key, body)) = &first_edited {
         match reopened.lookup(key) {
@@ -201,7 +227,7 @@ fn rebuild_mdd_source(
     };
 
     let mut deleted = 0u64;
-    let mut rewritten = 0u64;
+    let mut _rewritten = 0u64;
     let mut lossy_changed = 0u64;
     let mut lossy_total = 0u64;
     let total = file.len();
@@ -221,7 +247,7 @@ fn rebuild_mdd_source(
                 continue;
             }
             Some(rev) => {
-                rewritten += 1;
+                _rewritten += 1;
                 rev.current.clone()
             }
             None => file
@@ -255,6 +281,29 @@ fn rebuild_mdd_source(
         builder.add_resource(name, bytes).map_err(|e| e.to_string())?;
     }
 
+    // Pending resource insertions (validated against `existing` at insert
+    // time); lossy chain applies on the fly like every other resource.
+    let mut inserted_res = 0u64;
+    for ins in overlay
+        .insertions
+        .iter()
+        .filter(|i| i.target as usize == src_idx && i.kind == InsertKind::Resource)
+    {
+        let bytes = match lossy {
+            Some(steps) => {
+                lossy_total += 1;
+                let (out, changed) = apply_lossy(steps, &ins.name, &ins.bytes);
+                if changed {
+                    lossy_changed += 1;
+                }
+                out
+            }
+            None => ins.bytes.clone(),
+        };
+        builder.add_resource(&ins.name, &bytes).map_err(|e| e.to_string())?;
+        inserted_res += 1;
+    }
+
     let mut out = Vec::new();
     let summary = builder.finish(&mut out).map_err(|e| e.to_string())?;
     std::fs::write(out_path, &out).map_err(|e| e.to_string())?;
@@ -263,7 +312,7 @@ fn rebuild_mdd_source(
     let reopened = mdictlib::MddFile::open(out_path).map_err(|e| format!("reopen failed: {e}"))?;
     let embedded_count = (externals.len() - skipped.len()) as u64;
     let count_ok = reopened.len() == summary.entries
-        && summary.entries + deleted == file.len() + embedded_count;
+        && summary.entries + deleted == file.len() + embedded_count + inserted_res;
     let mut message = String::new();
     let mut check_ok = count_ok;
     if !count_ok {
@@ -401,7 +450,7 @@ pub fn export_build(
         for idx in 0..pool.sources.len() {
             let has_edits = overlay.revisions.keys().any(
                 |id| matches!(id, ResourceId::Mdd { source, .. } if *source as usize == idx),
-            );
+            ) || overlay.insertions.iter().any(|i| i.target as usize == idx);
             if !has_edits && !receives_embed(idx) {
                 continue;
             }
@@ -457,12 +506,14 @@ pub fn export_build(
                 }
                 let name = pool.sources[idx].name.trim_end_matches(".mdd").to_string();
                 let out_path = out_dir.join(format!("{name}.lossy.mdd"));
+                let lossy_externals: &[(String, Vec<u8>)] =
+                    if receives_embed(idx) { &externals } else { &[] };
                 let (file, skipped) = rebuild_mdd_source(
                     pool,
                     overlay,
                     idx,
                     &out_path,
-                    &externals,
+                    lossy_externals,
                     Some(lossy_steps),
                     ctl,
                 )?;

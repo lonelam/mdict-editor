@@ -78,7 +78,7 @@ impl Processor {
 
 fn minify_css(input: &[u8]) -> Result<Vec<u8>, String> {
     let src = std::str::from_utf8(input).map_err(|_| "css is not utf-8")?;
-    let mut sheet = lightningcss::stylesheet::StyleSheet::parse(
+    let sheet = lightningcss::stylesheet::StyleSheet::parse(
         src,
         lightningcss::stylesheet::ParserOptions::default(),
     )
