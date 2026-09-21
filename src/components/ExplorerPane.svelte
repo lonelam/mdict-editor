@@ -50,11 +50,43 @@
       y: e.clientY,
       items: [
         { label: "打开", act: () => store.openResource(m.id) },
+        ...(m.category === "entry"
+          ? [{
+              label: "重命名词头…",
+              act: () => {
+                renameOf = m;
+                renameText = m.key;
+              },
+            }]
+          : []),
         deleted
           ? { label: "还原（取消删除）", act: () => store.restoreResource(m.id) }
           : { label: "标记删除（导出生效）", danger: true, act: () => store.markDeleted(m.id) },
       ],
     };
+  }
+
+  // ---- rename entry head (overlay delete + pending insertion) ----
+  let renameOf = $state<ResourceMeta | null>(null);
+  let renameText = $state("");
+  let renaming = $state(false);
+
+  async function doRename() {
+    if (!renameOf) return;
+    renaming = true;
+    try {
+      const oldKey = renameOf.key;
+      const newKey = renameText.trim();
+      await api.renameEntry(renameOf.id, newKey);
+      store.toast("ok", `已重命名 ${oldKey} → ${newKey}（导出时生效）`);
+      renameOf = null;
+      store.bumpOverlay();
+      await refreshInsertions();
+    } catch (e) {
+      store.toast("error", String(e));
+    } finally {
+      renaming = false;
+    }
   }
 
   // ---- insertions ----
@@ -463,6 +495,27 @@
   <SourcePropsDialog props={propsOf} onclose={() => (propsOf = null)} />
 {/if}
 
+{#if renameOf}
+  <div class="modal" role="presentation" onclick={(e) => e.target === e.currentTarget && (renameOf = null)}>
+    <div class="modal-box rename">
+      <header>
+        <h3>重命名词头</h3>
+        <button class="x" onclick={() => (renameOf = null)}>×</button>
+      </header>
+      <label class="rename-field">
+        新词头
+        <input bind:value={renameText} placeholder="新词头" spellcheck="false" />
+      </label>
+      <footer>
+        <span class="hint">原词头标记删除，新词条进入待插入（导出时生效）</span>
+        <button class="ghost" onclick={() => (renameOf = null)}>取消</button>
+        <button class="primary" disabled={renaming || !renameText.trim() || renameText.trim() === renameOf.key}
+          onclick={doRename}>重命名</button>
+      </footer>
+    </div>
+  </div>
+{/if}
+
 {#if editIns}
   <div class="modal" role="presentation" onclick={(e) => e.target === e.currentTarget && (editIns = null)}>
     <div class="modal-box">
@@ -728,6 +781,24 @@
     color: #fff;
   }
   .modal-box footer button:disabled { opacity: 0.5; cursor: default; }
+  .modal-box.rename { width: min(460px, 92vw); }
+  .modal-box.rename .rename-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .modal-box.rename input {
+    flex: 1;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--font-code);
+    background: var(--bg-app);
+    color: var(--text-1);
+  }
   .search {
     margin: 0 12px 8px;
     padding: 5px 8px;

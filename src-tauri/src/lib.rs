@@ -1251,6 +1251,19 @@ fn remove_insertion(index: usize, state: tauri::State<AppState>) -> Result<bool,
     Ok(true)
 }
 
+/// Renames an entry head (recorded as delete-plus-insert in the overlay;
+/// materializes at export). See [`state::rename_entry`].
+#[tauri::command]
+fn rename_entry(
+    id: ResourceId,
+    new_key: String,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
+    crate::state::rename_entry(&pool, &mut overlay, &id, &new_key)
+}
+
 /// Hands exported dictionary files to AALookup — the reader app this editor
 /// shares its parsing core (mdictlib) and resource-resolution order with.
 /// AALookup imports and enables .mdx files handed to it on the command line
@@ -1376,6 +1389,7 @@ pub fn run() {
             list_insertions,
             update_insertion,
             read_insertion,
+            rename_entry,
             remove_insertion
         ])
         .register_uri_scheme_protocol("mdres", |ctx, request| {

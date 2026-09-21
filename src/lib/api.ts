@@ -167,6 +167,10 @@ export interface InsertionContent {
 export const readInsertion = (index: number) =>
   invoke<InsertionContent>("read_insertion", { index });
 
+/** Renames an entry head (overlay delete+insert; materializes at export). */
+export const renameEntry = (id: ResourceId, newKey: string) =>
+  invoke<void>("rename_entry", { id, newKey });
+
 export const removeInsertion = (index: number) =>
   invoke<boolean>("remove_insertion", { index });
 

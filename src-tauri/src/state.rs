@@ -324,6 +324,54 @@ pub fn current_bytes(
     }
 }
 
+/// Renames an MDX entry head. MDict has no in-place rename, so the overlay
+/// records it as delete-plus-insert: the old ordinal is marked deleted and a
+/// pending entry insertion carries the entry's current (overlay-aware) body
+/// under the new key. Both halves materialize at export; nothing touches the
+/// source file. Rejects empty keys and keys already taken by another entry
+/// (case-insensitively; a case-only rename of the same entry is allowed) or
+/// by a pending insertion.
+pub fn rename_entry(
+    pool: &SourcePool,
+    overlay: &mut Overlay,
+    id: &ResourceId,
+    new_key: &str,
+) -> Result<(), String> {
+    let new_key = new_key.trim();
+    if new_key.is_empty() {
+        return Err("新词头不能为空".into());
+    }
+    let ResourceId::Mdx { source, ordinal } = *id else {
+        return Err("仅 MDX 词条可重命名".into());
+    };
+    let entry = pool.get(id)?;
+    let Source::Mdx(file) = &entry.source else {
+        return Err(format!("{} 不是 MDX 源", entry.name));
+    };
+    if let Some(matches) = file.locate(new_key).map_err(|e| e.to_string())? {
+        if matches.iter().any(|m| m.get() != ordinal) {
+            return Err(format!("词头 {new_key:?} 已存在于 {}", entry.name));
+        }
+    }
+    if overlay
+        .insertions
+        .iter()
+        .any(|i| i.target == source && i.kind == InsertKind::Entry && i.name.to_lowercase() == new_key.to_lowercase())
+    {
+        return Err(format!("待插入列表中已有词头 {new_key:?}"));
+    }
+    let body = current_bytes(pool, overlay, id)?;
+    let original = pool.read_original(id)?;
+    overlay.delete(id.clone(), original);
+    overlay.insertions.push(Insertion {
+        target: source,
+        kind: InsertKind::Entry,
+        name: new_key.to_string(),
+        bytes: body,
+    });
+    Ok(())
+}
+
 /// Global managed state. RwLock so long-running readers (export, pipeline,
 /// preview) never block UI reads; writers stay mutually exclusive. Lock
 /// order is always pool → overlay → registry.

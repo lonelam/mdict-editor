@@ -5,7 +5,7 @@ use mdict_editor_lib::export::{export_build, ExportConfig};
 use mdict_editor_lib::fixtures;
 use mdict_editor_lib::pipeline::no_ctl;
 use mdict_editor_lib::registry::{self, Registry};
-use mdict_editor_lib::state::{AppState, InsertKind, Overlay, SourcePool};
+use mdict_editor_lib::state::{AppState, InsertKind, Overlay, ResourceId, SourcePool};
 
 fn setup() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
@@ -278,4 +278,70 @@ fn empty_created_sources_open_and_receive_insertions() {
     assert!(file.check_ok);
     let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
     assert!(reopened.locate("hello").unwrap().is_some());
+}
+
+/// Rename = overlay delete + pending insertion with the current body; export
+/// materializes it. Case-only renames pass, taken keys are rejected.
+#[test]
+fn rename_entry_roundtrip_and_validation() {
+    let (_dir, state) = setup();
+    let hello = ResourceId::Mdx { source: 0, ordinal: 2 };
+    let original_body = mdict_editor_lib::state::current_bytes(
+        &state.pool.read().unwrap(),
+        &state.overlay.read().unwrap(),
+        &hello,
+    )
+    .unwrap();
+
+    // Rename hello → hey there.
+    {
+        let pool = state.pool.read().unwrap();
+        let mut overlay = state.overlay.write().unwrap();
+        mdict_editor_lib::state::rename_entry(&pool, &mut overlay, &hello, "  hey there ").unwrap();
+    }
+    {
+        let overlay = state.overlay.read().unwrap();
+        assert!(overlay.get(&hello).is_some_and(|r| r.deleted), "old head deleted");
+        assert!(overlay.insertions.iter().any(|i| i.name == "hey there"));
+    }
+
+    // Taken key rejected; case-only rename of another entry allowed.
+    let world = ResourceId::Mdx { source: 0, ordinal: 4 };
+    {
+        let pool = state.pool.read().unwrap();
+        let mut overlay = state.overlay.write().unwrap();
+        let err = mdict_editor_lib::state::rename_entry(&pool, &mut overlay, &world, "苹果").unwrap_err();
+        assert!(err.contains("已存在"), "{err}");
+        mdict_editor_lib::state::rename_entry(&pool, &mut overlay, &world, "WORLD").unwrap();
+    }
+
+    // Export: renamed heads present with carried bodies, old heads gone.
+    let out = out_dir();
+    let report = export_build(
+        &state.pool.read().unwrap(),
+        &state.overlay.read().unwrap(),
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            edited: true,
+            ..Default::default()
+        },
+        &no_ctl(),
+    )
+    .unwrap();
+    let file = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("ocean.mdx"))
+        .expect("mdx exported");
+    assert!(file.check_ok, "{}", file.message);
+    let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
+    let renamed = reopened.locate("hey there").unwrap().expect("renamed head");
+    assert_eq!(renamed.iter().count(), 1);
+    let entry = reopened
+        .entry_at(mdictlib::KeyOrdinal::new(renamed.iter().next().unwrap().get()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.text().as_bytes(), original_body.as_slice());
+    assert!(reopened.locate("hello").unwrap().is_none(), "old head gone");
+    assert!(reopened.locate("WORLD").unwrap().is_some(), "case rename applied");
 }
