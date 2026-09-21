@@ -156,6 +156,17 @@ export const listInsertions = (source: number | null) =>
 export const updateInsertion = (index: number, html: string) =>
   invoke<void>("update_insertion", { index, html });
 
+export interface InsertionContent {
+  index: number;
+  kind: "entry" | "resource";
+  name: string;
+  /** UTF-8 text for text categories; null for binary resources. */
+  text: string | null;
+}
+
+export const readInsertion = (index: number) =>
+  invoke<InsertionContent>("read_insertion", { index });
+
 export const removeInsertion = (index: number) =>
   invoke<boolean>("remove_insertion", { index });
 

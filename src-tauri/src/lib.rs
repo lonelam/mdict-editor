@@ -1185,8 +1185,9 @@ fn list_insertions(
         .collect())
 }
 
-/// Updates an entry insertion's HTML body (index-based; removing shifts ids,
-/// the UI refreshes the list right after any mutation).
+/// Updates an insertion's body (index-based; removing shifts ids, the UI
+/// refreshes the list right after any mutation). Text-content insertions of
+/// both kinds (entry HTML, text resources) are editable.
 #[tauri::command]
 fn update_insertion(
     index: usize,
@@ -1198,11 +1199,45 @@ fn update_insertion(
         .insertions
         .get_mut(index)
         .ok_or_else(|| format!("插入项 {index} 不存在"))?;
-    if ins.kind != InsertKind::Entry {
-        return Err("仅词条插入可编辑文本".into());
-    }
     ins.bytes = html.into_bytes();
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InsertionContent {
+    index: usize,
+    kind: &'static str,
+    name: String,
+    /// UTF-8 text for text categories (entry/html/css/js/text); None for
+    /// binary resources, which the UI does not edit inline.
+    text: Option<String>,
+}
+
+/// Returns one pending insertion's content for inline editing.
+#[tauri::command]
+fn read_insertion(
+    index: usize,
+    state: tauri::State<AppState>,
+) -> Result<InsertionContent, String> {
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+    let ins = overlay
+        .insertions
+        .get(index)
+        .ok_or_else(|| format!("插入项 {index} 不存在"))?;
+    let category = match ins.kind {
+        InsertKind::Entry => crate::category::Category::Entry,
+        InsertKind::Resource => crate::category::Category::from_key(&ins.name),
+    };
+    let text = category
+        .is_text()
+        .then(|| String::from_utf8_lossy(&ins.bytes).into_owned());
+    Ok(InsertionContent {
+        index,
+        kind: insertion_kind_str(ins.kind),
+        name: ins.name.clone(),
+        text,
+    })
 }
 
 /// Removes a pending insertion (swap-remove; UI refreshes indices after).
@@ -1340,6 +1375,7 @@ pub fn run() {
             insert_resources,
             list_insertions,
             update_insertion,
+            read_insertion,
             remove_insertion
         ])
         .register_uri_scheme_protocol("mdres", |ctx, request| {

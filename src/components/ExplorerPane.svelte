@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import ContextMenu from "./ContextMenu.svelte";
   import SourcePropsDialog from "./SourcePropsDialog.svelte";
@@ -159,6 +160,68 @@
     }
   }
 
+  onMount(() => void refreshInsertions());
+
+  // ---- inline editing of pending insertions ----
+  let editIns = $state<{ index: number; name: string; kind: string } | null>(null);
+  let editInsText = $state("");
+  let editInsSaving = $state(false);
+
+  async function openInsEditor(ins: InsertionInfo) {
+    try {
+      const content = await api.readInsertion(ins.index);
+      if (content.text === null) {
+        store.toast("info", `“${ins.name}” 是二进制资源，暂不支持在线编辑；可移除后重新导入`);
+        return;
+      }
+      editIns = { index: ins.index, name: ins.name, kind: ins.kind };
+      editInsText = content.text;
+    } catch (e) {
+      store.toast("error", String(e));
+    }
+  }
+
+  async function saveInsertion() {
+    if (!editIns) return;
+    editInsSaving = true;
+    try {
+      await api.updateInsertion(editIns.index, editInsText);
+      store.toast("ok", `已保存 “${editIns.name}”`);
+      editIns = null;
+      await refreshInsertions();
+    } catch (e) {
+      store.toast("error", String(e));
+    } finally {
+      editInsSaving = false;
+    }
+  }
+
+  /** Category of a pending insertion — mirrors backend Category::from_key. */
+  function insCategory(ins: InsertionInfo): Category {
+    if (ins.kind === "entry") return "entry";
+    const base = ins.name.split(/[\\/]/).pop() ?? "";
+    const dot = base.lastIndexOf(".");
+    const ext = dot === -1 ? "" : base.slice(dot + 1).toLowerCase();
+    switch (ext) {
+      case "html": case "htm": case "xhtml": return "html";
+      case "css": return "css";
+      case "js": case "mjs": return "js";
+      case "png": case "jpg": case "jpeg": case "gif": case "webp": case "bmp":
+      case "svg": case "ico": return "image";
+      case "mp3": case "wav": case "ogg": case "spx": case "m4a": case "aac":
+      case "flac": return "audio";
+      case "mp4": case "m4v": case "webm": case "mov": return "video";
+      case "ttf": case "otf": case "woff": case "woff2": case "eot": case "ttc": return "font";
+      case "txt": case "xml": case "csv": case "json": case "md": case "ini":
+      case "srt": return "text";
+      default: return "other";
+    }
+  }
+
+  function insertionsOf(sourceId: number, category: Category): InsertionInfo[] {
+    return insertions.filter((i) => i.target === sourceId && insCategory(i) === category);
+  }
+
   const catLabels: Record<Category, string> = {
     entry: "词条", html: "HTML", css: "CSS", js: "JS", image: "图片",
     audio: "音频", video: "视频", font: "字体", text: "文本", other: "其他",
@@ -183,7 +246,15 @@
 
   function sourceCats(sourceId: number): { category: Category; count: number; edited: number }[] {
     const stats = store.stats[sourceId] ?? [];
-    return [...stats].sort(
+    // Insertions land in the tree under their target source: make sure their
+    // categories exist even when the source itself has no rows there yet.
+    const merged = new Map(stats.map((s) => [s.category, s]));
+    for (const ins of insertions) {
+      if (ins.target !== sourceId) continue;
+      const cat = insCategory(ins);
+      if (!merged.has(cat)) merged.set(cat, { category: cat, count: 0, edited: 0 });
+    }
+    return [...merged.values()].sort(
       (a, b) => catOrder.indexOf(a.category) - catOrder.indexOf(b.category)
     );
   }
@@ -279,19 +350,7 @@
   {/if}
 
   {#if insertions.length > 0}
-    <div class="insert-list">
-      <div class="insert-head">待插入 · {insertions.length} 项（导出时写入）</div>
-      {#each insertions as ins (ins.index)}
-        <div class="insert-row">
-          <span class="tag" class:res={ins.kind === "resource"}>
-            {ins.kind === "entry" ? "词条" : "资源"}
-          </span>
-          <span class="name" title={ins.name}>{ins.name}</span>
-          <span class="size">{ins.size}B</span>
-          <button class="drop" title="移除" onclick={() => dropInsertion(ins.index)}>×</button>
-        </div>
-      {/each}
-    </div>
+    <div class="insert-note">待插入 {insertions.length} 项已并入下方各源的分类树（导出时写入）</div>
   {/if}
 
   <input
@@ -353,15 +412,29 @@
           {#if expandedSources.has(src.id)}
             {#each sourceCats(src.id) as st (st.category)}
               {@const catKey = `${src.id}:${st.category}`}
+              {@const insCount = insertionsOf(src.id, st.category).length}
               <button class="cat-row" onclick={() => toggleCat(catKey)}>
                 <span class="twist">{expandedCats.has(catKey) ? "▾" : "▸"}</span>
                 <span class="cat-name">{catLabels[st.category]}</span>
                 {#if st.edited > 0}
                   <span class="edited-count" title="已编辑">⚡{st.edited}</span>
                 {/if}
+                {#if insCount > 0}
+                  <span class="ins-count" title="待插入">+{insCount}</span>
+                {/if}
                 <span class="count">{st.count.toLocaleString()}</span>
               </button>
               {#if expandedCats.has(catKey)}
+                {#each insertionsOf(src.id, st.category) as ins (ins.index)}
+                  <div class="ins-row" title="待插入（导出时写入）">
+                    <span class="ins-mark">＋</span>
+                    <button class="res-btn" onclick={() => openInsEditor(ins)}>
+                      <span class="key">{ins.name}</span>
+                      <span class="size">{ins.size}B</span>
+                    </button>
+                    <button class="drop" title="移除待插入项" onclick={() => dropInsertion(ins.index)}>×</button>
+                  </div>
+                {/each}
                 <ResourceRows
                     sourceId={src.id}
                     category={st.category}
@@ -388,6 +461,23 @@
 {/if}
 {#if propsOf}
   <SourcePropsDialog props={propsOf} onclose={() => (propsOf = null)} />
+{/if}
+
+{#if editIns}
+  <div class="modal" role="presentation" onclick={(e) => e.target === e.currentTarget && (editIns = null)}>
+    <div class="modal-box">
+      <header>
+        <h3>{editIns.kind === "entry" ? "编辑词条插入" : "编辑资源插入"} · {editIns.name}</h3>
+        <button class="x" onclick={() => (editIns = null)}>×</button>
+      </header>
+      <textarea bind:value={editInsText} rows="14" spellcheck="false"></textarea>
+      <footer>
+        <span class="hint">待插入项，导出时写入词典文件</span>
+        <button class="ghost" onclick={() => (editIns = null)}>取消</button>
+        <button class="primary" disabled={editInsSaving} onclick={saveInsertion}>保存</button>
+      </footer>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -535,41 +625,109 @@
     cursor: pointer;
   }
   .empty-actions button:hover { background: var(--bg-hover); }
-  .insert-list {
+  .insert-note {
     margin: 0 12px 8px;
-    border: 1px dashed var(--accent);
-    border-radius: 8px;
-    padding: 6px;
+    font-size: 11px;
+    color: var(--accent);
   }
-  .insert-head { font-size: 11px; color: var(--accent); margin-bottom: 4px; }
-  .insert-row {
+  .ins-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    padding: 2px 4px;
+    gap: 4px;
+    padding-left: 32px;
   }
-  .insert-row .tag {
-    font-size: 9px;
+  .ins-row .ins-mark {
+    color: var(--accent);
+    font-size: 11px;
     font-weight: 700;
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: var(--accent);
-    color: #fff;
+    width: 12px;
+    text-align: center;
     flex-shrink: 0;
   }
-  .insert-row .tag.res { background: #8b5cf6; }
-  .insert-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .insert-row .size { color: var(--text-3); font-size: 10px; flex-shrink: 0; }
-  .insert-row .drop {
+  .ins-row .key { color: var(--accent); }
+  .ins-row .size { color: var(--text-3); font-size: 10px; flex-shrink: 0; }
+  .ins-row .drop {
     border: none;
     background: transparent;
     color: var(--text-3);
     cursor: pointer;
     font-size: 13px;
     padding: 0 2px;
+    flex-shrink: 0;
   }
-  .insert-row .drop:hover { color: var(--danger); }
+  .ins-row .drop:hover { color: var(--danger); }
+  .ins-count {
+    color: var(--accent);
+    font-size: 11px;
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+  .modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-box {
+    width: min(640px, 92vw);
+    max-height: 84vh;
+    background: var(--bg-pane);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    padding: 14px;
+    gap: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  }
+  .modal-box header { display: flex; justify-content: space-between; align-items: center; }
+  .modal-box h3 { margin: 0; font-size: 13px; }
+  .modal-box .x {
+    border: none;
+    background: none;
+    font-size: 16px;
+    cursor: pointer;
+    color: var(--text-3);
+  }
+  .modal-box textarea {
+    flex: 1;
+    min-height: 220px;
+    resize: vertical;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 8px;
+    font-family: var(--font-code);
+    font-size: 12px;
+    background: var(--bg-app);
+    color: var(--text-1);
+  }
+  .modal-box footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .modal-box footer .hint { margin-right: auto; }
+  .modal-box footer button {
+    border: none;
+    border-radius: 8px;
+    font-size: 12px;
+    padding: 6px 16px;
+    cursor: pointer;
+  }
+  .modal-box footer .ghost {
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-app);
+    color: var(--text-1);
+  }
+  .modal-box footer .primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .modal-box footer button:disabled { opacity: 0.5; cursor: default; }
   .search {
     margin: 0 12px 8px;
     padding: 5px 8px;
