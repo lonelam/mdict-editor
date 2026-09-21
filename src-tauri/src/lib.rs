@@ -235,6 +235,29 @@ struct OpenResult {
     errors: Vec<String>,
 }
 
+/// Registers an already-opened [`SourceEntry`] in the pool (dedupe by
+/// canonical path) and returns its [`SourceInfo`].
+fn register_source(
+    pool: &mut SourcePool,
+    registry: &mut Registry,
+    entry: crate::state::SourceEntry,
+) -> Result<SourceInfo, String> {
+    if pool.has_active_path(&entry.path) {
+        return Err(format!("{}: 已加载（重复打开已跳过）", entry.name));
+    }
+    let info = SourceInfo {
+        id: pool.sources.len() as u32,
+        kind: entry.kind(),
+        name: entry.name.clone(),
+        title: entry.title.clone(),
+        entry_count: entry.entry_count(),
+        dir: entry.path.parent().map(|p| p.display().to_string()),
+    };
+    pool.sources.push(entry);
+    registry.indices.push(None);
+    Ok(info)
+}
+
 /// Opens paths (mdx/mdd/js/css mixed) and appends them as active sources.
 /// Same-path re-opens are skipped; per-file errors do not abort the batch.
 #[tauri::command]
@@ -249,29 +272,77 @@ fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<Ope
     for path in paths {
         match SourcePool::open_path(&path) {
             Ok(entry) => {
-                if pool.has_active_path(&entry.path) {
-                    result.skipped.push(entry.name);
-                    continue;
+                let name = entry.name.clone();
+                match register_source(&mut pool, &mut registry, entry) {
+                    Ok(info) => result.added.push(info),
+                    Err(_) => result.skipped.push(name),
                 }
-                let info = SourceInfo {
-                    id: pool.sources.len() as u32,
-                    kind: entry.kind(),
-                    name: entry.name.clone(),
-                    title: entry.title.clone(),
-                    entry_count: entry.entry_count(),
-                    dir: entry
-                        .path
-                        .parent()
-                        .map(|p| p.display().to_string()),
-                };
-                pool.sources.push(entry);
-                registry.indices.push(None);
-                result.added.push(info);
             }
             Err(e) => result.errors.push(e),
         }
     }
     Ok(result)
+}
+
+/// Creates a brand-new empty dictionary file at `path` (`kind` = "mdx" |
+/// "mdd") and opens it as a source. Existing files are never overwritten.
+#[tauri::command]
+fn create_source(
+    kind: String,
+    path: String,
+    state: tauri::State<AppState>,
+) -> Result<SourceInfo, String> {
+    let path = path.trim().to_string();
+    if path.is_empty() {
+        return Err("路径不能为空".into());
+    }
+    let p = std::path::PathBuf::from(&path);
+    if p.exists() {
+        return Err(format!("文件已存在，未覆盖: {path}"));
+    }
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut bytes = Vec::new();
+    match kind.as_str() {
+        "mdx" => {
+            let mut builder = mdictlib::MdxBuilder::with_options(
+                mdictlib::WriteOptions::new()
+                    .with_encoding(mdictlib::WriteEncoding::Utf8)
+                    .with_compression(mdictlib::WriteCompression::Zlib),
+            );
+            if !stem.is_empty() {
+                builder.header_attribute("Title", &stem).map_err(|e| e.to_string())?;
+            }
+            builder
+                .finish(&mut bytes)
+                .map_err(|e| format!("生成 MDX 失败: {e}"))?;
+        }
+        "mdd" => {
+            let mut builder = mdictlib::MddBuilder::with_options(
+                mdictlib::WriteOptions::new()
+                    .with_compression(mdictlib::WriteCompression::Zlib),
+            );
+            if !stem.is_empty() {
+                builder.header_attribute("Title", &stem).map_err(|e| e.to_string())?;
+            }
+            builder
+                .finish(&mut bytes)
+                .map_err(|e| format!("生成 MDD 失败: {e}"))?;
+        }
+        other => return Err(format!("未知的源类型 {other:?}（mdx / mdd）")),
+    }
+    if let Some(parent) = p.parent() {
+        // The save dialog should have picked an existing directory, but a
+        // hand-typed path may not have one yet.
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    std::fs::write(&p, &bytes).map_err(|e| format!("写入失败: {e}"))?;
+    let entry = SourcePool::open_path(&path)?;
+    let mut pool = state.pool.write().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
+    register_source(&mut pool, &mut registry, entry)
 }
 
 /// Removes (tombstones) a source. Ids stay stable; overlay edits that point
@@ -1247,6 +1318,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             open_sources,
+            create_source,
             resource_stats,
             list_resources,
             resource_meta,

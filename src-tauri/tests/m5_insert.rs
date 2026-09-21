@@ -200,3 +200,82 @@ fn remove_insertion_restores_clean_export() {
     let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
     assert!(reopened.locate("temp").unwrap().is_none(), "removed insertion absent");
 }
+
+/// New-file workflow (创建新词典): a builder-emitted EMPTY mdx/mdd opens as
+/// a source, indexes cleanly, and pending insertions materialize at export.
+#[test]
+fn empty_created_sources_open_and_receive_insertions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mdx_path = dir.path().join("fresh.mdx");
+    let mdd_path = dir.path().join("fresh.mdd");
+    let mut bytes = Vec::new();
+    let mut mdx = mdictlib::MdxBuilder::with_options(
+        mdictlib::WriteOptions::new()
+            .with_encoding(mdictlib::WriteEncoding::Utf8)
+            .with_compression(mdictlib::WriteCompression::Zlib),
+    );
+    mdx.header_attribute("Title", "fresh").unwrap();
+    mdx.finish(&mut bytes).unwrap();
+    std::fs::write(&mdx_path, &bytes).unwrap();
+    let mut bytes = Vec::new();
+    mdictlib::MddBuilder::with_options(
+        mdictlib::WriteOptions::new().with_compression(mdictlib::WriteCompression::Zlib),
+    )
+    .finish(&mut bytes)
+    .unwrap();
+    std::fs::write(&mdd_path, &bytes).unwrap();
+
+    let state = AppState::default();
+    {
+        let mut pool = state.pool.write().unwrap();
+        for p in [&mdx_path, &mdd_path] {
+            pool.sources.push(SourcePool::open_path(p.to_str().unwrap()).unwrap());
+        }
+    }
+    {
+        let pool = state.pool.read().unwrap();
+        assert_eq!(pool.sources[0].entry_count(), 0);
+        assert_eq!(pool.sources[1].entry_count(), 0);
+        assert_eq!(pool.sources[0].title.as_deref(), Some("fresh"));
+        let mut registry = state.registry.write().unwrap();
+        registry::ensure_built(&pool, &mut registry).unwrap();
+    }
+
+    let mut overlay = Overlay::default();
+    overlay
+        .insertions
+        .push(mdict_editor_lib::state::Insertion {
+            target: 0,
+            kind: InsertKind::Entry,
+            name: "hello".into(),
+            bytes: b"<p>hi</p>".to_vec(),
+        });
+    overlay
+        .insertions
+        .push(mdict_editor_lib::state::Insertion {
+            target: 1,
+            kind: InsertKind::Resource,
+            name: "img/x.png".into(),
+            bytes: vec![1, 2, 3],
+        });
+    let out = out_dir();
+    let report = export_build(
+        &state.pool.read().unwrap(),
+        &overlay,
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            edited: true,
+            ..Default::default()
+        },
+        &no_ctl(),
+    )
+    .unwrap();
+    let file = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("fresh.mdx"))
+        .expect("fresh.mdx exported");
+    assert!(file.check_ok);
+    let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
+    assert!(reopened.locate("hello").unwrap().is_some());
+}

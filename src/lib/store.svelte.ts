@@ -106,6 +106,20 @@ class AppStore {
     }
   }
 
+  /** Creates a new empty .mdx/.mdd at `path` and loads it as a source. */
+  async createSource(kind: "mdx" | "mdd", path: string) {
+    try {
+      const s = await api.createSource(kind, path);
+      this.sources = [...this.sources, s];
+      void this.refreshStats(s.id);
+      this.toast("ok", `已创建并加载 ${s.name}`);
+      return s;
+    } catch (e) {
+      this.toast("error", String(e));
+      return null;
+    }
+  }
+
   /** Marks a resource deleted (export effect; revert to undo). */
   async markDeleted(id: ResourceId) {
     try {

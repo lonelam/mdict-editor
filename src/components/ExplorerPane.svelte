@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+  import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import ContextMenu from "./ContextMenu.svelte";
   import SourcePropsDialog from "./SourcePropsDialog.svelte";
   import * as api from "../lib/api";
@@ -96,10 +96,19 @@
 
   let insTarget = $state<number | null>(null);
   let insPrefix = $state("");
+  let showResForm = $state(false);
+  let showNewPanel = $state(false);
+
+  function toggleResForm() {
+    showResForm = !showResForm;
+    if (showResForm && insTarget === null && mddSources.length > 0) {
+      insTarget = mddSources[0].id;
+    }
+  }
 
   async function pickResourceFiles() {
     if (mddSources.length === 0) {
-      store.toast("error", "请先打开一个 MDD 源");
+      store.toast("error", "请先打开（或新建）一个 MDD 源");
       return;
     }
     const paths = await openFileDialog({ multiple: true });
@@ -119,6 +128,25 @@
       store.toast("error", String(e));
     } finally {
       busy = false;
+    }
+  }
+
+  /** Save-dialog → backend creates the empty file and opens it as a source. */
+  async function createNew(kind: "mdx" | "mdd") {
+    const ext = kind === "mdx" ? ".mdx" : ".mdd";
+    let path = await saveFileDialog({
+      defaultPath: kind === "mdx" ? "新词典.mdx" : "新资源库.mdd",
+      filters: [
+        { name: kind === "mdx" ? "MDX 词典" : "MDD 资源库", extensions: [ext.slice(1)] },
+      ],
+    });
+    if (!path) return;
+    // open_path dispatches on the extension — make sure it is there.
+    if (!path.toLowerCase().endsWith(ext)) path += ext;
+    const s = await store.createSource(kind, path);
+    if (s) {
+      showNewPanel = false;
+      if (kind === "mdd" && showResForm && insTarget === null) insTarget = s.id;
     }
   }
 
@@ -197,8 +225,11 @@
       <button title="向第一个 MDX 源插入新词条" onclick={() => (showInsertForm = !showInsertForm)}>
         ＋词条
       </button>
-      <button title="向第一个 MDD 源导入资源文件" onclick={pickResourceFiles} disabled={busy}>
+      <button title="选择文件导入 MDD 资源（可设目标与前缀）" onclick={toggleResForm} disabled={busy}>
         ＋资源
+      </button>
+      <button title="新建空的 MDX / MDD 文件并加载" onclick={() => (showNewPanel = !showNewPanel)}>
+        ＋新建
       </button>
     </div>
   </header>
@@ -210,12 +241,15 @@
         <span class="hint" hidden={mdxSources.length === 0}>目标: {mdxSources[0]?.name}</span>
         <button type="submit" disabled={busy || !insKey.trim()}>加入待插入</button>
       </div>
+      {#if mdxSources.length === 0}
+        <p class="hint">还没有 MDX 源——先 <button type="button" class="link" onclick={() => createNew("mdx")}>新建一个 MDX</button> 或打开现有词典。</p>
+      {/if}
     </form>
   {/if}
 
-  {#if showInsertForm}
-    {#if mddSources.length > 0}
-      <div class="insert-res">
+  {#if showResForm}
+    <div class="insert-res">
+      {#if mddSources.length > 0}
         <label>
           导入资源到
           <select bind:value={insTarget}>
@@ -229,8 +263,19 @@
           <input bind:value={insPrefix} placeholder="如 img/custom（可空）" />
         </label>
         <button onclick={pickResourceFiles} disabled={busy}>选择文件并加入待插入…</button>
-      </div>
-    {/if}
+      {:else}
+        <span class="hint">还没有 MDD 源——</span>
+        <button onclick={() => createNew("mdd")} disabled={busy}>新建 MDD 资源库…</button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if showNewPanel}
+    <div class="new-panel">
+      <button onclick={() => createNew("mdx")} disabled={busy}>新建 MDX 词典…</button>
+      <button onclick={() => createNew("mdd")} disabled={busy}>新建 MDD 资源库…</button>
+      <p class="hint">空文件创建后立即加载；词条/资源加入待插入，导出时写入。</p>
+    </div>
   {/if}
 
   {#if insertions.length > 0}
@@ -260,6 +305,10 @@
       <p>尚无资源。</p>
       <p>打开 .mdx / .mdd 词典，</p>
       <p>或直接添加外部 .js / .css。</p>
+      <div class="empty-actions">
+        <button onclick={() => createNew("mdx")}>新建 MDX 词典…</button>
+        <button onclick={() => createNew("mdd")}>新建 MDD 资源库…</button>
+      </div>
     </div>
   {:else if store.search}
     <div class="results">
@@ -438,6 +487,54 @@
     padding: 4px 10px;
     cursor: pointer;
   }
+  .insert-res button:disabled, .new-panel button:disabled { opacity: 0.5; cursor: default; }
+  .new-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 12px 8px;
+    padding: 8px;
+    border: 1px dashed var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-app);
+  }
+  .new-panel button {
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-pane);
+    color: var(--text-1);
+    font-size: 12px;
+    padding: 5px 8px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .new-panel button:hover:not(:disabled) { background: var(--bg-hover); }
+  .hint { font-size: 11px; color: var(--text-3); margin: 0; }
+  .hint .link, button.link {
+    border: none;
+    background: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0;
+    text-decoration: underline;
+  }
+  .empty-actions {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .empty-actions button {
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-app);
+    color: var(--text-1);
+    font-size: 11px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .empty-actions button:hover { background: var(--bg-hover); }
   .insert-list {
     margin: 0 12px 8px;
     border: 1px dashed var(--accent);

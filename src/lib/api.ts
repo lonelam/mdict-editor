@@ -17,6 +17,11 @@ export async function openSources(paths: string[]): Promise<OpenResult> {
   return invoke("open_sources", { paths });
 }
 
+/** Creates a new empty dictionary file on disk and opens it as a source. */
+export async function createSource(kind: "mdx" | "mdd", path: string): Promise<SourceInfo> {
+  return invoke("create_source", { kind, path });
+}
+
 export async function removeSource(id: number): Promise<boolean> {
   return invoke("remove_source", { id });
 }
