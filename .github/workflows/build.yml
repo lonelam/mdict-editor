@@ -45,7 +45,7 @@ jobs:
       - name: Install macOS dependencies
         if: startsWith(matrix.platform, 'macos')
         run: |
-          brew install lzo pkg-config
+          brew install autoconf automake libtool lzo pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix lzo)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - uses: swatinem/rust-cache@v2
