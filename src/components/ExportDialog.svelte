@@ -11,7 +11,6 @@
   let embedTarget = $state<number | null>(null);
   let genEdited = $state(true);
   let genLossy = $state(false);
-  // (duplicate genLossy removed)
   let onlyEdited = $state(false);
 
   // Default output location: the first mdx source's folder (else any source's).
@@ -111,6 +110,10 @@
         <input type="checkbox" bind:checked={genEdited} />
         生成 <b>edited/</b>（保真版：全部已加载文件原名导出，含编辑与插入）
       </label>
+      <label class="indented">
+        <input type="checkbox" bind:checked={onlyEdited} disabled={!genEdited} />
+        仅重建有修改/插入的词典文件（其余跳过；只改了几个词条时快得多）
+      </label>
       <label>
         <input type="checkbox" bind:checked={genLossy} />
         生成 <b>lossy/</b>（压缩分发版：同一套文件；图片 WebP + PNG 量化 + 音频 Opus；JS/CSS 不动）
@@ -164,9 +167,21 @@
     </section>
 
     {#if running}
+      {@const indeterminate = !progress || progress.total === 0}
       <div class="job-progress">
-        <div class="bar"><div class="fill" style:width={`${progress && progress.total ? (progress.done / progress.total) * 100 : 0}%`}></div></div>
-        <span>{progress ? `${progress.done}/${progress.total} · ${progress.item}` : "准备中…"}</span>
+        <div class="bar" class:indeterminate>
+          <div
+            class="fill"
+            style:width={indeterminate || !progress
+              ? "30%"
+              : `${(progress.done / progress.total) * 100}%`}
+          ></div>
+        </div>
+        <span>
+          {#if progress}
+            {progress.total ? `${progress.done}/${progress.total} · ${progress.item}` : progress.item}
+          {:else}准备中…{/if}
+        </span>
         <button class="cancel" onclick={() => job && api.cancelJob(job)}>取消</button>
       </div>
     {/if}
@@ -325,6 +340,15 @@
     height: 100%;
     background: var(--accent);
     transition: width 0.15s;
+  }
+  /* Heartbeat phases (压缩/校验) report total = 0 — sweep instead of freeze. */
+  .job-progress .bar.indeterminate .fill {
+    animation: sweep 1.2s ease-in-out infinite;
+    transition: none;
+  }
+  @keyframes sweep {
+    0% { margin-left: -30%; }
+    100% { margin-left: 100%; }
   }
   .job-progress span {
     max-width: 260px;

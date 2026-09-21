@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,33 @@ use crate::processors;
 use crate::processors::Processor;
 use crate::registry::normalize_key;
 use crate::state::{current_bytes, InsertKind, Overlay, ResourceId, Source, SourcePool};
+
+/// Runs `f`, emitting a once-per-second "still alive" progress (`0/0` +
+/// label + elapsed seconds) so opaque phases — zlib `finish`, the reopen
+/// self-check — never look frozen. The UI renders `total == 0` as an
+/// indeterminate bar.
+fn with_heartbeat<T>(ctl: &JobCtl, label: &str, f: impl FnOnce() -> T) -> T {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let flag = &stop;
+        let progress = ctl.progress;
+        scope.spawn(move || {
+            let start = std::time::Instant::now();
+            let mut last = u64::MAX;
+            while !flag.load(Ordering::Relaxed) {
+                let secs = start.elapsed().as_secs();
+                if secs != last {
+                    last = secs;
+                    progress(0, 0, &format!("{label} · {secs}s"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        });
+        let value = f();
+        stop.store(true, Ordering::Relaxed);
+        value
+    })
+}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -106,9 +134,12 @@ fn rebuild_mdx_source(
         });
     }
 
-    let mut edits = mdictlib::EditSet::new();
+    // Edit-set phase (usually tiny): resolve every revision to its key.
     let mut deleted = 0u64;
     let mut first_edited: Option<(String, String)> = None;
+    let mut deletions: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut replacements: std::collections::HashMap<u64, String> =
+        std::collections::HashMap::new();
     let total = edits_map.len() as u64;
     for (i, ((_src, ordinal), rev)) in edits_map.iter().enumerate() {
         if (ctl.cancelled)() {
@@ -120,41 +151,74 @@ fn rebuild_mdx_source(
             .map(|k| k.key().to_string())
             .unwrap_or_default();
         (ctl.progress)(i as u64, total, &key_name);
-        let ordinal = mdictlib::KeyOrdinal::new(*ordinal);
-        let key = file
-            .key_at(ordinal)
-            .map_err(|e| e.to_string())?
-            .ok_or("missing key")?
-            .key()
-            .to_string();
         if rev.deleted {
-            edits.delete(ordinal);
+            deletions.insert(*ordinal);
             deleted += 1;
         } else {
             let body = String::from_utf8_lossy(&rev.current).into_owned();
             if first_edited.is_none() {
-                first_edited = Some((key.clone(), body.clone()));
+                first_edited = Some((key_name, body.clone()));
             }
-            edits.replace_body(ordinal, body);
+            replacements.insert(*ordinal, body);
         }
     }
 
-    let mut inserted = 0u64;
-    for ins in &insertions {
-        let body = String::from_utf8_lossy(&ins.bytes).into_owned();
-        edits.insert(ins.name.clone(), body);
-        inserted += 1;
-    }
+    let ins_list: Vec<(String, String)> = insertions
+        .iter()
+        .map(|ins| {
+            (
+                ins.name.clone(),
+                String::from_utf8_lossy(&ins.bytes).into_owned(),
+            )
+        })
+        .collect();
 
+    // Streaming rebuild with per-entry progress (the same edit semantics as
+    // mdictlib::rebuild_mdx, spelled out so the walk can report itself).
+    let source_name = pool.sources[src_idx].name.clone();
     let options = mdictlib::WriteOptions::new()
         .with_encoding(mdictlib::WriteEncoding::Utf8)
         .with_compression(mdictlib::WriteCompression::Zlib);
+    let mut builder = mdictlib::MdxBuilder::with_options(options);
+    let total = file.len() + ins_list.len() as u64;
+    let mut seen = 0u64;
+    for entry in file.entries() {
+        if (ctl.cancelled)() {
+            return Err("已取消".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        seen += 1;
+        let ordinal = entry.key_entry().ordinal();
+        if deletions.contains(&ordinal.get()) {
+            continue;
+        }
+        let key = entry.key();
+        (ctl.progress)(seen, total, key);
+        match replacements.get(&ordinal.get()) {
+            Some(body) => builder.add_entry(key, body.as_str()),
+            None => builder.add_entry(key, entry.text()),
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    let mut inserted = 0u64;
+    for (name, body) in &ins_list {
+        seen += 1;
+        inserted += 1;
+        (ctl.progress)(seen, total, name);
+        builder.add_entry(name, body.as_str()).map_err(|e| e.to_string())?;
+    }
+
     let mut out = Vec::new();
-    let summary = mdictlib::rebuild_mdx(file, &edits, options, &mut out).map_err(|e| e.to_string())?;
+    let summary =
+        with_heartbeat(ctl, &format!("压缩写入 {source_name}"), || builder.finish(&mut out))
+            .map_err(|e| e.to_string())?;
     std::fs::write(out_path, &out).map_err(|e| e.to_string())?;
 
     // Self-check: reopen, compare counts, spot-check the first edited entry.
-    let reopened = mdictlib::MdxFile::open(out_path).map_err(|e| format!("reopen failed: {e}"))?;
+    let reopened = with_heartbeat(ctl, &format!("校验 {source_name}"), || {
+        mdictlib::MdxFile::open(out_path)
+    })
+    .map_err(|e| format!("reopen failed: {e}"))?;
     let mut message = String::new();
     let mut check_ok =
         reopened.len() == summary.entries && summary.entries + deleted == file.len() + inserted;
@@ -273,13 +337,16 @@ fn rebuild_mdd_source(
         Some(steps) => {
             lossy_total = items.len() as u64;
             use rayon::prelude::*;
-            let changed_count = std::sync::atomic::AtomicU64::new(0);
+            let changed_count = AtomicU64::new(0);
+            let done = AtomicU64::new(0);
             let out: Vec<(String, Vec<u8>)> = items
                 .into_par_iter()
                 .map(|(name, raw)| {
+                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    (ctl.progress)(n, lossy_total, &name);
                     let (out, changed) = apply_lossy(steps, &name, &raw, ctl);
                     if changed {
-                        changed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        changed_count.fetch_add(1, Ordering::Relaxed);
                     }
                     (name, out)
                 })
@@ -326,12 +393,18 @@ fn rebuild_mdd_source(
         inserted_res += 1;
     }
 
+    let source_name = pool.sources[src_idx].name.clone();
     let mut out = Vec::new();
-    let summary = builder.finish(&mut out).map_err(|e| e.to_string())?;
+    let summary =
+        with_heartbeat(ctl, &format!("压缩写入 {source_name}"), || builder.finish(&mut out))
+            .map_err(|e| e.to_string())?;
     std::fs::write(out_path, &out).map_err(|e| e.to_string())?;
 
     // Self-check: reopen; counts and a resource round-trip.
-    let reopened = mdictlib::MddFile::open(out_path).map_err(|e| format!("reopen failed: {e}"))?;
+    let reopened = with_heartbeat(ctl, &format!("校验 {source_name}"), || {
+        mdictlib::MddFile::open(out_path)
+    })
+    .map_err(|e| format!("reopen failed: {e}"))?;
     let embedded_count = (externals.len() - skipped.len()) as u64;
     let count_ok = reopened.len() == summary.entries
         && summary.entries + deleted == file.len() + embedded_count + inserted_res;
