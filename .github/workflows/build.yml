@@ -1,8 +1,8 @@
 name: build
 
-# 3-platform client builds (Windows / macOS / Linux).
+# 3-platform client builds (Windows / macOS Apple Silicon / macOS Intel / Linux).
 # - push a `v*` tag → builds all platforms and publishes a GitHub Release
-#   with the installers (NSIS/MSI, Apple Silicon DMG, AppImage/deb)
+#   with the installers (NSIS/MSI, DMG x2, AppImage/deb)
 # - manual dispatch → artifacts on the workflow run
 #
 # mdictlib comes from crates.io; no sibling checkout is needed.
@@ -18,10 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon only: audiopus_sys's autotools build does not
-          # cross-compile for the universal x86_64 half (links the host
-          # arm64 lib), and Intel Macs are long EOL.
+          # Apple Silicon build
           - platform: macos-latest
+            args: ""
+          # Native Intel macOS build (bypasses audiopus_sys cross-compile bug)
+          # CRITICAL FIX: macos-13 is retired. macos-15-intel is the official x86_64 runner.
+          - platform: macos-15-intel
             args: ""
           - platform: ubuntu-22.04
             args: ""
@@ -38,11 +40,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # audiopus_sys builds vendored libopus with autotools (autogen +
-      # configure + make), absent from the default macOS image.
-      - name: Install autotools (libopus build)
-        if: runner.os == 'MacOS'
-        run: brew install autoconf automake libtool pkg-config
+      # mdictlib's "lzo" feature needs liblzo + pkg-config. 
+      # (autoconf/automake/libtool are pre-installed by GitHub)
+      - name: Install macOS dependencies
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          brew install autoconf automake libtool lzo pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix lzo)/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -63,7 +67,7 @@ jobs:
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: mdict-editor-${{ matrix.platform }}-${{ matrix.args }}
+          name: mdict-editor-${{ matrix.platform }}
           if-no-files-found: error
           path: |
             src-tauri/target/**/bundle/dmg/*.dmg
