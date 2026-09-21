@@ -558,6 +558,80 @@ fn inject_preview_css(
     patched.into_bytes()
 }
 
+/// Final HTML for the MDX entry preview: follows `@@@LINK=word` redirect
+/// chains the way reader apps do (each hop overlay-aware), injects companion
+/// CSS, and when a redirect was actually followed prepends a small badge
+/// naming the hop path so the previewed content is not mistaken for the
+/// entry's own body. Dead targets and cycles stop the walk and fall back to
+/// the last resolved entry's raw text.
+fn preview_entry_html(
+    pool: &SourcePool,
+    overlay: &Overlay,
+    registry: &Registry,
+    ctx: &ResourceId,
+    mut bytes: Vec<u8>,
+) -> Vec<u8> {
+    const MAX_HOPS: usize = 16;
+    let mut hops: Vec<String> = Vec::new();
+    let mut visited: Vec<ResourceId> = Vec::new();
+    let mut current = ctx.clone();
+    loop {
+        if visited.len() >= MAX_HOPS || visited.contains(&current) {
+            break;
+        }
+        let Some(word) = resolver::link_redirect_target(&bytes) else {
+            break;
+        };
+        visited.push(current.clone());
+        let Some(next) = resolver::find_entry(pool, &word) else {
+            break;
+        };
+        if overlay.get(&next).is_some_and(|r| r.deleted) {
+            break;
+        }
+        match state::current_bytes(pool, overlay, &next) {
+            Ok(b) => bytes = b,
+            Err(_) => break,
+        }
+        hops.push(word);
+        current = next;
+    }
+    let bytes = inject_preview_css(pool, overlay, registry, &bytes);
+    if hops.is_empty() {
+        return bytes;
+    }
+    let start = pool.key_of(ctx).unwrap_or_default();
+    let path = std::iter::once(start)
+        .chain(hops)
+        .collect::<Vec<_>>()
+        .join(" → ");
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return bytes;
+    };
+    let badge = format!(
+        "<div style=\"position:absolute;top:6px;right:8px;z-index:2147483647;\
+pointer-events:none;font:11px/1.6 sans-serif;color:#666;\
+background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.3);\
+border-radius:4px;padding:1px 8px;\">@@@LINK 跳转: {path}</div>"
+    );
+    inject_after_body_open(&text, &badge).into_bytes()
+}
+
+/// Inserts `fragment` right after the opening `<body>` tag (or prepends it
+/// when the document has no body tag).
+fn inject_after_body_open(text: &str, fragment: &str) -> String {
+    let lower = text.to_lowercase();
+    if let Some(pos) = lower.find("<body") {
+        let insert_at = text[pos..]
+            .find('>')
+            .map(|o| pos + o + 1)
+            .unwrap_or(pos);
+        format!("{}{}{}", &text[..insert_at], fragment, &text[insert_at..])
+    } else {
+        format!("{fragment}{text}")
+    }
+}
+
 /// Resolves a reference found inside `context` (Ctrl+Click jump support).
 #[tauri::command]
 fn resolve_reference(
@@ -653,7 +727,7 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
                 Err(e) => return not_found(&e),
             };
             if matches!(ctx, ResourceId::Mdx { .. }) {
-                let bytes = inject_preview_css(&pool, &overlay, &registry, &bytes);
+                let bytes = preview_entry_html(&pool, &overlay, &registry, &ctx, bytes);
                 return ok("text/html; charset=utf-8", bytes);
             }
             return ok("text/html; charset=utf-8", bytes);

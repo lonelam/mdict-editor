@@ -4,6 +4,7 @@ import {
   cleanRefText,
   extractHtmlRefs,
   looksLikePath,
+  parseLinkRedirect,
 } from "./refs";
 
 describe("classifyReference", () => {
@@ -78,5 +79,33 @@ describe("extractHtmlRefs", () => {
       "./p.jpg",
       "entry://world",
     ]);
+  });
+});
+
+describe("parseLinkRedirect", () => {
+  it("parses a plain redirect with exact target range", () => {
+    expect(parseLinkRedirect("@@@LINK=hello")).toEqual({
+      target: "hello",
+      reference: "entry://hello",
+      from: 8,
+      to: 13,
+    });
+  });
+
+  it("tolerates surrounding whitespace, newlines and entry:// prefix", () => {
+    const r = parseLinkRedirect("\r\n  @@@LINK= entry://hello world \r\n");
+    expect(r?.target).toBe("hello world");
+    expect(r?.reference).toBe("entry://hello world");
+    // Range covers the trimmed target inside the original text.
+    expect("\r\n  @@@LINK= entry://hello world \r\n".slice(r?.from ?? 0, r?.to ?? 0)).toBe(
+      "entry://hello world",
+    );
+  });
+
+  it("rejects non-redirect bodies", () => {
+    expect(parseLinkRedirect("<p>hi</p>")).toBeNull();
+    expect(parseLinkRedirect("@@@LINK=hello\nmore")).toBeNull();
+    expect(parseLinkRedirect("@@@LINK=")).toBeNull();
+    expect(parseLinkRedirect("@@@LINK=   ")).toBeNull();
   });
 });

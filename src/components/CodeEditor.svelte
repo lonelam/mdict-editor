@@ -194,8 +194,8 @@
   }
   .status.error { color: var(--danger); }
 
-  /* Reference link affordances */
-  .code-pane :global(.cm-ctrl-down .cm-res-ref) {
+  /* Reference link affordances: always visible; Ctrl+Click to jump. */
+  .code-pane :global(.cm-res-ref) {
     text-decoration: underline dashed var(--accent);
     text-underline-offset: 3px;
     cursor: pointer;

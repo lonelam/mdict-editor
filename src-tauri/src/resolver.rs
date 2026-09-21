@@ -167,7 +167,30 @@ fn suffix_hits(
     (ids, keys)
 }
 
-fn find_entry(pool: &SourcePool, word: &str) -> Option<ResourceId> {
+/// Parses an MDict redirect entry: a body that is nothing but
+/// `@@@LINK=word` (case-insensitive marker, optional `entry://` prefix,
+/// surrounding whitespace and a BOM tolerated). Readers follow these
+/// transparently instead of rendering the raw text. Returns the target word.
+pub fn link_redirect_target(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let head = text.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n']);
+    if !head
+        .as_bytes()
+        .get(..8)?
+        .eq_ignore_ascii_case(b"@@@LINK=")
+    {
+        return None;
+    }
+    let rest = head[8..].trim_matches([' ', '\t', '\r', '\n']);
+    // A pure redirect is a single line; anything after it is real content.
+    if rest.contains(['\r', '\n']) {
+        return None;
+    }
+    let word = rest.strip_prefix("entry://").unwrap_or(rest).trim();
+    (!word.is_empty()).then(|| word.to_string())
+}
+
+pub(crate) fn find_entry(pool: &SourcePool, word: &str) -> Option<ResourceId> {
     for (idx, entry) in pool.sources.iter().enumerate() {
         let Source::Mdx(file) = &entry.source else {
             continue;

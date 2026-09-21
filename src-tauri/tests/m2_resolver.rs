@@ -357,3 +357,102 @@ fn loose_path_traversal_rejected() {
     assert!(loose_asset_relative_path("COM1.txt").is_err());
     assert!(loose_asset_relative_path("a/b.png").is_ok());
 }
+
+/// `@@@LINK=word` redirect parsing: whole-body redirects only, optional
+/// `entry://` prefix and surrounding whitespace stripped.
+#[test]
+fn link_redirect_target_parsing() {
+    use mdict_editor_lib::resolver::link_redirect_target;
+    assert_eq!(link_redirect_target(b"@@@LINK=hello"), Some("hello".into()));
+    assert_eq!(
+        link_redirect_target(b"\r\n @@@LINK= entry://hello \r\n"),
+        Some("hello".into())
+    );
+    assert_eq!(link_redirect_target(b"<p>hi</p>"), None);
+    // Extra content after the redirect line disqualifies it.
+    assert_eq!(link_redirect_target(b"@@@LINK=hello\nmore"), None);
+    assert_eq!(link_redirect_target(b"@@@LINK="), None);
+    assert_eq!(link_redirect_target(&[0xff, 0xfe]), None);
+}
+
+/// Builds a dedicated mdx: alpha→beta redirect, dead target, two-entry cycle.
+/// Sorted keys → ordinals: alpha=0, beta=1, dead=2, loop1=3, loop2=4.
+fn redirect_state() -> (AppState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mdx = mdictlib::MdxBuilder::with_options(
+        mdictlib::WriteOptions::new()
+            .with_encoding(mdictlib::WriteEncoding::Utf8)
+            .with_compression(mdictlib::WriteCompression::Zlib),
+    );
+    mdx.add_entry("alpha", "@@@LINK=beta").unwrap();
+    mdx.add_entry("beta", "<p>beta body</p>").unwrap();
+    mdx.add_entry("dead", "@@@LINK=nowhere").unwrap();
+    mdx.add_entry("loop1", "@@@LINK=loop2").unwrap();
+    mdx.add_entry("loop2", "@@@LINK=loop1").unwrap();
+    let mut bytes = Vec::new();
+    mdx.finish(&mut bytes).unwrap();
+    let path = dir.path().join("redirect.mdx");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let state = AppState::default();
+    {
+        // ensure_built borrows the pool; pass the write guard itself rather
+        // than taking a second (read) lock over the held write lock.
+        let mut pool = state.pool.write().unwrap();
+        pool.sources
+            .push(SourcePool::open_path(path.to_str().unwrap()).unwrap());
+        let mut registry = state.registry.write().unwrap();
+        registry::ensure_built(&pool, &mut registry).unwrap();
+    }
+    (state, dir)
+}
+
+/// The MDX entry preview follows @@@LINK redirects like a reader, with a
+/// badge naming the hop path; dead targets and cycles fall back to the raw
+/// redirect text instead of looping forever.
+#[test]
+fn mdres_follows_link_redirects() {
+    let (state, _dir) = redirect_state();
+
+    // alpha redirects to beta: the preview shows beta's body plus a badge.
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-0/");
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8_lossy(resp.body()).into_owned();
+    assert!(body.contains("beta body"), "{body}");
+    assert!(body.contains("@@@LINK 跳转: alpha → beta"), "{body}");
+
+    // beta itself previews normally (no badge, no redirect text).
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-1/");
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8_lossy(resp.body()).into_owned();
+    assert_eq!(body, "<p>beta body</p>");
+
+    // Dead target: raw redirect text stays visible for diagnosis.
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-2/");
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8_lossy(resp.body()).into_owned();
+    assert!(body.contains("@@@LINK=nowhere"), "{body}");
+
+    // Cycle: the walk terminates and serves a raw redirect line.
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-3/");
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8_lossy(resp.body()).into_owned();
+    assert!(body.contains("@@@LINK="), "{body}");
+}
+
+/// An edited redirect target is served through the chain: the preview
+/// reflects overlay bytes of the final entry, not the source file.
+#[test]
+fn mdres_redirect_serves_edited_target() {
+    let (state, _dir) = redirect_state();
+    let beta = ResourceId::Mdx { source: 0, ordinal: 1 };
+    state
+        .overlay
+        .write()
+        .unwrap()
+        .write(beta.clone(), b"<p>beta body</p>".to_vec(), b"<p>edited beta</p>".to_vec());
+    let resp = mdict_editor_lib::handle_mdres_request(&state, "/preview/mdx-0-0/");
+    assert_eq!(resp.status(), 200);
+    let body = String::from_utf8_lossy(resp.body()).into_owned();
+    assert!(body.contains("edited beta"), "{body}");
+}

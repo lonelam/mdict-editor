@@ -58,3 +58,36 @@ export function extractHtmlRefs(html: string): string[] {
   while ((m = re.exec(html))) out.push(m[2]);
   return out;
 }
+
+export interface LinkRedirect {
+  /** Target word with any `entry://` prefix stripped. */
+  target: string;
+  /** Ready-to-navigate reference (`entry://<target>`). */
+  reference: string;
+  /** Range of the (trimmed) target inside the original text. */
+  from: number;
+  to: number;
+}
+
+/** Matches a whole document that is nothing but an MDict redirect line. */
+const REDIRECT_RE = /^([ \t\r\n\uFEFF]*)@@@LINK=([^\r\n]*)\r?\n?$/i;
+
+/**
+ * Parses an MDict `@@@LINK=word` redirect entry body: the entire text must be
+ * one redirect line (plus optional surrounding whitespace/newline/BOM). The
+ * optional `entry://` prefix on the word is accepted and normalized away.
+ */
+export function parseLinkRedirect(text: string): LinkRedirect | null {
+  const m = REDIRECT_RE.exec(text);
+  if (!m) return null;
+  const group = m[2] ?? "";
+  const shown = group.trim();
+  const target = shown.replace(/^entry:\/\//i, "").trim();
+  if (!target) return null;
+  const from =
+    (m.index ?? 0) +
+    (m[1]?.length ?? 0) +
+    "@@@LINK=".length +
+    (group.length - group.trimStart().length);
+  return { target, reference: `entry://${target}`, from, to: from + shown.length };
+}

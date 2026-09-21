@@ -1,6 +1,7 @@
 // CodeMirror extension: finds resource references in the syntax tree (HTML
-// attribute values, CSS url()/strings, JS string literals), decorates them
-// while Ctrl is held, and turns Ctrl+Click into a resource jump.
+// attribute values, CSS url()/strings, JS string literals) and in whole-body
+// `@@@LINK=word` redirect entries, decorates them at all times, and turns
+// Ctrl+Click into a resource jump.
 import {
   Decoration,
   type DecorationSet,
@@ -9,11 +10,17 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
-import type { Range } from "@codemirror/state";
-import { classifyReference, cleanRefText } from "../refs";
+import { classifyReference, cleanRefText, parseLinkRedirect } from "../refs";
 
-/** Clickable-while-Ctrl decoration. */
+/** Clickable reference decoration. */
 const refMark = Decoration.mark({ class: "cm-res-ref" });
+
+/** One decorated range plus the reference string a click navigates to. */
+interface RefHit {
+  from: number;
+  to: number;
+  reference: string;
+}
 
 function isJumpable(text: string): boolean {
   const kind = classifyReference(text);
@@ -21,11 +28,11 @@ function isJumpable(text: string): boolean {
 }
 
 /** Collects reference ranges from the current syntax tree. */
-function collectRefs(view: EditorView): Range<Decoration>[] {
-  const hits: Range<Decoration>[] = [];
+function collectRefs(view: EditorView): RefHit[] {
+  const hits: RefHit[] = [];
   const push = (from: number, to: number, raw: string) => {
-    const text = cleanRefText(raw);
-    if (isJumpable(text)) hits.push(refMark.range(from, to));
+    const reference = cleanRefText(raw);
+    if (isJumpable(reference)) hits.push({ from, to, reference });
   };
 
   syntaxTree(view.state).iterate({
@@ -52,6 +59,12 @@ function collectRefs(view: EditorView): Range<Decoration>[] {
       return undefined;
     },
   });
+
+  // A whole-body `@@@LINK=word` redirect: the target word is jumpable.
+  const redirect = parseLinkRedirect(view.state.doc.toString());
+  if (redirect) {
+    hits.push({ from: redirect.from, to: redirect.to, reference: redirect.reference });
+  }
   return hits;
 }
 
@@ -60,11 +73,11 @@ export function referenceLinks(onRef: (reference: string) => void) {
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = Decoration.set(collectRefs(view));
+        this.decorations = decorationsOf(view);
       }
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged) {
-          this.decorations = Decoration.set(collectRefs(update.view));
+          this.decorations = decorationsOf(update.view);
         }
       }
     },
@@ -79,45 +92,16 @@ export function referenceLinks(onRef: (reference: string) => void) {
           const hit = collectRefs(view).find((d) => pos >= d.from && pos <= d.to);
           if (!hit) return false;
           me.preventDefault();
-          const reference = cleanRefText(view.state.doc.sliceString(hit.from, hit.to));
-          onRef(reference);
+          onRef(hit.reference);
           return true;
         },
       },
     }
   );
 
-  // Tracks Ctrl so CSS can show the underline affordance.
-  const ctrlTracker = ViewPlugin.fromClass(
-    class {
-      ctrl = false;
-      constructor(readonly view: EditorView) {}
-      update() {}
-      destroy() {
-        this.view.contentDOM.classList.remove("cm-ctrl-down");
-      }
-    },
-    {
-      eventHandlers: {
-        keydown: (event, view) => {
-          if ((event as KeyboardEvent).key === "Control") {
-            view.contentDOM.classList.add("cm-ctrl-down");
-          }
-          return false;
-        },
-        keyup: (event, view) => {
-          if ((event as KeyboardEvent).key === "Control") {
-            view.contentDOM.classList.remove("cm-ctrl-down");
-          }
-          return false;
-        },
-        blur: (_event, view) => {
-          view.contentDOM.classList.remove("cm-ctrl-down");
-          return false;
-        },
-      },
-    }
-  );
+  return refsPlugin;
+}
 
-  return [refsPlugin, ctrlTracker];
+function decorationsOf(view: EditorView): DecorationSet {
+  return Decoration.set(collectRefs(view).map((h) => refMark.range(h.from, h.to)));
 }

@@ -13,7 +13,7 @@
   {#if !tab}
     <div class="empty">
       <p>从左侧资源树选择一个资源开始</p>
-      <p class="sub">文本类资源支持 Ctrl+点击 跳转引用（如 <code>src="/img/logo.png"</code>）</p>
+      <p class="sub">引用会实时高亮，Ctrl+点击 跳转（如 <code>src="/img/logo.png"</code>、<code>@@@LINK=词条</code>）；<code>@@@LINK</code> 重定向词条的预览会自动跟随到目标词条</p>
       <p class="sub">
         编辑结果可与 <a
           href="https://aalookup.com"
