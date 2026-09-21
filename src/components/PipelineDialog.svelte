@@ -67,13 +67,16 @@
     reports = null;
     progress = { done: 0, total: 0, item: "启动中…" };
     try {
-      const start = dry
-        ? api.pipelineDryRunStart(buildSteps(), buildScope())
-        : api.pipelineApplyStart(buildSteps(), buildScope());
-      start.then((id) => (job = id));
-      reports = await api.runJob<StepReport[]>(start, (done, total, item) => {
-        progress = { done, total, item };
-      });
+      reports = await api.runJob<StepReport[]>(
+        () =>
+          dry
+            ? api.pipelineDryRunStart(buildSteps(), buildScope())
+            : api.pipelineApplyStart(buildSteps(), buildScope()),
+        (done, total, item) => {
+          progress = { done, total, item };
+        },
+        (id) => (job = id)
+      );
       if (!dry) {
         const ok = reports.filter((r) => r.status === "ok");
         const saved = ok.reduce((sum, r) => sum + r.delta, 0);

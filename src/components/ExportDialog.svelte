@@ -45,27 +45,30 @@
     running = true;
     progress = { done: 0, total: 0, item: "启动中…" };
     try {
-      const start = api.exportStart({
-        outDir,
-        edited: genEdited,
-        embedExternals: embed,
-        embedTarget,
-        onlyEdited,
-        lossy: genLossy
-          ? [
-              { kind: "img-webp", quality: 75 },
-              { kind: "png-quantize", colors: 256 },
-              { kind: "audio-opus", bitrateKbps: 24 },
-            ]
-          : null,
-      });
-      start.then((id) => (job = id));
-      report = await api.runJob<ExportReport>(start, (done, total, item) => {
-        progress = { done, total, item };
-      });
+      report = await api.runJob<ExportReport>(
+        () =>
+          api.exportStart({
+            outDir,
+            edited: genEdited,
+            embedExternals: embed,
+            embedTarget,
+            onlyEdited,
+            lossy: genLossy
+              ? [
+                  { kind: "img-webp", quality: 75 },
+                  { kind: "png-quantize", colors: 256 },
+                  { kind: "audio-opus", bitrateKbps: 24 },
+                ]
+              : null,
+          }),
+        (done, total, item) => {
+          progress = { done, total, item };
+        },
+        (id) => (job = id)
+      );
       const ok = report.files.filter((f) => f.checkOk).length;
       if (report.files.length === 0) {
-        store.toast("info", "没有需要导出的内容：无编辑，且未勾选有损副本/外部嵌入");
+        store.toast("info", "没有需要导出的内容：勾选了“仅重建有修改的文件”，但当前没有修改或待插入项");
       } else {
         store.toast(report.ok ? "ok" : "info", `导出完成：${ok}/${report.files.length} 项校验通过`);
       }
@@ -108,7 +111,7 @@
       <h3>内容</h3>
       <label>
         <input type="checkbox" bind:checked={genEdited} />
-        生成 <b>edited/</b>（保真版：全部已加载文件原名导出，含编辑与插入）
+        生成 <b>edited/</b> 子文件夹（保真版：全部已加载文件原名导出，含编辑与插入）
       </label>
       <label class="indented">
         <input type="checkbox" bind:checked={onlyEdited} disabled={!genEdited} />
@@ -132,9 +135,9 @@
         <p class="note">未加载外部 js/css 文件，嵌入选项不可用。</p>
       {/if}
       <p class="note">
-        有损副本独立于原始版本：原始产物照常导出，改写层与源文件不受影响。
-        两个文件夹各自包含全部已加载文件；lossy/ 只转换图片与音频，词典 JS/CSS 原样复制
-        （压缩会破坏部分词典脚本）。
+        保真版始终会导出：勾选 edited/ 放入子文件夹，都不勾选则直接写入输出目录；
+        lossy/ 是额外的压缩分发副本（只转换图片与音频，词典 JS/CSS 原样复制——压缩会破坏部分词典脚本）。
+        改写层与源文件不受影响。
       </p>
     </section>
 

@@ -57,7 +57,7 @@
   }
 
   async function applyOps() {
-    const steps = [];
+    const steps: import("../lib/types").Processor[] = [];
     if (opResize && (resizeW !== width || resizeH !== height)) {
       steps.push({ kind: "img-resize", width: resizeW || null, height: resizeH || null });
     }
@@ -74,7 +74,7 @@
     busy = true;
     try {
       const reports = await api.runJob<import("../lib/types").StepReport[]>(
-        api.pipelineApplyStart(steps as never, { ids: [id] })
+        () => api.pipelineApplyStart(steps as never, { ids: [id] })
       );
       const rep = reports[0];
       if (rep.status === "ok") {

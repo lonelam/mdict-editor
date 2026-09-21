@@ -379,3 +379,40 @@ fn export_edited_and_lossy_coexist() {
         image::ImageFormat::Jpeg
     );
 }
+
+/// Plain export (neither box checked): the faithful set lands directly in
+/// out_dir — no edited/ subfolder, edits applied.
+#[test]
+fn export_plain_writes_to_output_root() {
+    let (_dir, state) = setup();
+    let out = tempfile::tempdir().unwrap();
+
+    let hello = ResourceId::Mdx { source: 0, ordinal: 2 };
+    let original = state.pool.read().unwrap().read_original(&hello).unwrap();
+    let mut overlay = Overlay::default();
+    overlay.write(hello.clone(), original, b"<p>edited hello</p>".to_vec());
+
+    let report = export_build(
+        &state.pool.read().unwrap(),
+        &overlay,
+        &ExportConfig {
+            out_dir: out.path().display().to_string(),
+            edited: false,
+            lossy: None,
+            ..Default::default()
+        },
+        &no_ctl(),
+    )
+    .unwrap();
+
+    let file = report
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("ocean.mdx"))
+        .expect("mdx at output root");
+    assert!(!file.path.contains("edited"), "{}", file.path);
+    assert!(!out.path().join("edited").exists(), "no edited/ subfolder");
+    let reopened = mdictlib::MdxFile::open(&file.path).unwrap();
+    let entry = reopened.lookup("hello").unwrap().expect("hello");
+    assert_eq!(entry.text(), "<p>edited hello</p>");
+}

@@ -62,15 +62,17 @@ interface JobDone<T> {
 
 /**
  * Starts a background job and awaits its completion, surfacing per-item
- * progress. `start` invokes a `*_start` command that returns the job id;
- * progress and completion arrive as `job-progress` / `job-done` events.
+ * progress. `start` is a THUNK: it is only invoked after the event listeners
+ * are registered — an already-fired job can finish and emit `job-done`
+ * before a listener attaches, losing the event and hanging the await (an
+ * empty export completes in milliseconds). `onJobId` receives the id once
+ * the start command settles.
  */
 export async function runJob<T>(
-  start: Promise<string>,
-  onProgress?: (done: number, total: number, item: string) => void
+  start: () => Promise<string>,
+  onProgress?: (done: number, total: number, item: string) => void,
+  onJobId?: (id: string) => void
 ): Promise<T> {
-  // Listeners are registered before the job id arrives: the backend emits
-  // immediately, and `job-done` may even land before `await start` settles.
   let jobId: string | null = null;
   let settle: ((v: T) => void) | null = null;
   let fail: ((e: Error) => void) | null = null;
@@ -106,7 +108,8 @@ export async function runJob<T>(
     });
   });
   try {
-    jobId = await start;
+    jobId = await start();
+    onJobId?.(jobId);
   } catch (e) {
     unP();
     unD();

@@ -49,7 +49,9 @@ pub struct ExportConfig {
     pub out_dir: String,
     /// Emit the `edited/` folder: every loaded source (mdx/mdd under their
     /// original names, external js/css copied verbatim), with overlay edits
-    /// applied. Nothing irreversible happens here.
+    /// applied. Nothing irreversible happens here. When false and no lossy
+    /// chain is selected, the same faithful set is written directly into
+    /// `out_dir` (plain export); a lossy-only run emits no faithful copy.
     pub edited: bool,
     /// Emit the `lossy/` folder: the same complete file set, with this lossy
     /// chain applied to MDD resources (images/audio only — js/css are never
@@ -505,10 +507,17 @@ pub fn export_build(
     let mut name_seen: std::collections::HashSet<(bool, String)> =
         std::collections::HashSet::new();
 
-    // ---- edited/: every loaded source under its original name ----
-    if config.edited {
-        let edited_dir = out_dir.join("edited");
-        std::fs::create_dir_all(&edited_dir).map_err(|e| format!("mkdir edited: {e}"))?;
+    // ---- faithful set (edits applied, original names): under edited/ when
+    // 生成 edited/ is checked; directly in out_dir when neither box is
+    // checked (plain export); skipped by a lossy-only run. ----
+    let lossy_steps = config.lossy.clone().filter(|s| !s.is_empty());
+    let faithful_dir = if config.edited {
+        out_dir.join("edited")
+    } else {
+        out_dir.to_path_buf()
+    };
+    if config.edited || lossy_steps.is_none() {
+        std::fs::create_dir_all(&faithful_dir).map_err(|e| format!("mkdir output: {e}"))?;
         for idx in 0..pool.sources.len() {
             let entry = &pool.sources[idx];
             if entry.tombstone {
@@ -524,9 +533,9 @@ pub fn export_build(
                         continue;
                     }
                     if !name_seen.insert((false, entry.name.clone())) {
-                        return Err(format!("edited/ 文件名冲突: {}", entry.name));
+                        return Err(format!("输出文件名冲突: {}", entry.name));
                     }
-                    let out_path = edited_dir.join(&entry.name);
+                    let out_path = faithful_dir.join(&entry.name);
                     let file = rebuild_mdx_source(pool, overlay, idx, &out_path, config.only_edited, ctl)?;
                     report.ok |= file.check_ok;
                     report.files.push(file);
@@ -536,9 +545,9 @@ pub fn export_build(
                         continue;
                     }
                     if !name_seen.insert((false, entry.name.clone())) {
-                        return Err(format!("edited/ 文件名冲突: {}", entry.name));
+                        return Err(format!("输出文件名冲突: {}", entry.name));
                     }
-                    let out_path = edited_dir.join(&entry.name);
+                    let out_path = faithful_dir.join(&entry.name);
                     let exts: Vec<(String, Vec<u8>)> = if receives_embed(idx) {
                         externals.clone()
                     } else {
@@ -553,7 +562,7 @@ pub fn export_build(
                 Source::External { .. } => {
                     let id = ResourceId::Ext { file: idx as u32 };
                     let bytes = crate::state::current_bytes(pool, overlay, &id)?;
-                    let out_path = edited_dir.join(&entry.name);
+                    let out_path = faithful_dir.join(&entry.name);
                     std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
                     report.files.push(ExportedFile {
                         path: out_path.display().to_string(),
@@ -570,7 +579,7 @@ pub fn export_build(
 
     // ---- lossy/: the same complete set; MDD resources run the lossy chain
     // (images/audio only), mdx and externals are copied verbatim. ----
-    if let Some(lossy_steps) = config.lossy.clone().filter(|s| !s.is_empty()) {
+    if let Some(lossy_steps) = lossy_steps {
         let lossy_dir = out_dir.join("lossy");
         std::fs::create_dir_all(&lossy_dir).map_err(|e| format!("mkdir lossy: {e}"))?;
         for idx in 0..pool.sources.len() {
