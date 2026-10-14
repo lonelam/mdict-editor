@@ -47,6 +47,8 @@ pub struct SourceEntry {
     pub title: Option<String>,
     /// Canonical filesystem path; identical re-opens are deduped on it.
     pub path: PathBuf,
+    /// Content identity at open time; projects refuse a different source.
+    pub fingerprint: String,
     /// Tombstone: removed sources keep their slot (ids stay stable) but are
     /// skipped by every iteration and refused by [`SourcePool::get`].
     pub tombstone: bool,
@@ -93,6 +95,7 @@ impl SourcePool {
             .unwrap_or("")
             .to_ascii_lowercase();
         let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let fingerprint = crate::project::fingerprint(p)?;
         match ext.as_str() {
             "mdx" => {
                 let file = MdxFile::open(path).map_err(|e| format!("{name}: {e}"))?;
@@ -101,6 +104,7 @@ impl SourcePool {
                     name,
                     title,
                     path: canonical,
+                    fingerprint,
                     tombstone: false,
                     source: Source::Mdx(file),
                 })
@@ -111,6 +115,7 @@ impl SourcePool {
                     name,
                     title: None,
                     path: canonical,
+                    fingerprint,
                     tombstone: false,
                     source: Source::Mdd(file),
                 })
@@ -124,6 +129,7 @@ impl SourcePool {
                     name,
                     title: None,
                     path: canonical,
+                    fingerprint,
                     tombstone: false,
                     source: Source::External {
                         path: p.to_path_buf(),
@@ -240,7 +246,8 @@ pub struct Insertion {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InsertKind {
     Entry,
     Resource,

@@ -30,6 +30,9 @@ export async function listSources(): Promise<SourceInfo[]> {
   return invoke("list_sources");
 }
 
+export const saveProject = (path: string) => invoke<void>("save_project", { path });
+export const openProject = (path: string) => invoke<SourceInfo[]>("open_project", { path });
+
 export interface SourceProps {
   id: number;
   kind: string;

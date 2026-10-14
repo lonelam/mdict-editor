@@ -8,6 +8,7 @@ pub mod export;
 pub mod fixtures;
 pub mod pipeline;
 pub mod processors;
+pub mod project;
 pub mod registry;
 pub mod resolver;
 pub mod state;
@@ -261,7 +262,13 @@ fn register_source(
 /// Opens paths (mdx/mdd/js/css mixed) and appends them as active sources.
 /// Same-path re-opens are skipped; per-file errors do not abort the batch.
 #[tauri::command]
-fn open_sources(paths: Vec<String>, state: tauri::State<AppState>) -> Result<OpenResult, String> {
+async fn open_sources(paths: Vec<String>, app: AppHandle) -> Result<OpenResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        open_sources_impl(paths, &app.state::<AppState>())
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn open_sources_impl(paths: Vec<String>, state: &AppState) -> Result<OpenResult, String> {
     let mut pool = state.pool.write().map_err(|e| e.to_string())?;
     let mut registry = state.registry.write().map_err(|e| e.to_string())?;
     let mut result = OpenResult {
@@ -353,6 +360,7 @@ fn remove_source(id: u32, state: tauri::State<AppState>) -> Result<bool, String>
     let mut overlay = state.overlay.write().map_err(|e| e.to_string())?;
     pool.remove(id as usize)?;
     overlay.revisions.retain(|k, _| k.source_index() != id);
+    overlay.insertions.retain(|i| i.target != id);
     Ok(true)
 }
 
@@ -941,6 +949,32 @@ fn list_sources(state: tauri::State<AppState>) -> Result<Vec<SourceInfo>, String
         .collect())
 }
 
+/// Project I/O runs off the UI thread (hashing a large dictionary can take time).
+#[tauri::command]
+async fn save_project(path: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let pool = state.pool.read().map_err(|e| e.to_string())?;
+        let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+        project::save(std::path::Path::new(&path), &pool, &overlay)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn open_project(path: String, app: AppHandle) -> Result<Vec<SourceInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let jobs = app.state::<Jobs>();
+        // Keep new jobs from starting against the session being replaced.
+        let running = jobs.cancels.lock().map_err(|e| e.to_string())?;
+        if !running.is_empty() {
+            return Err("请等待处理管线或导出完成后再打开项目".into());
+        }
+        let state = app.state::<AppState>();
+        project::load(std::path::Path::new(&path), &state)?;
+        list_sources(state)
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Starts a dry-run job; progress/done arrive via events. Returns job id.
 #[tauri::command]
 fn pipeline_dry_run_start(
@@ -1173,8 +1207,8 @@ fn list_insertions(
     Ok(overlay
         .insertions
         .iter()
-        .filter(|i| source.is_none_or(|s| i.target == s))
         .enumerate()
+        .filter(|(_, i)| source.is_none_or(|s| i.target == s))
         .map(|(index, i)| InsertionInfo {
             index,
             kind: insertion_kind_str(i.kind),
@@ -1378,6 +1412,8 @@ pub fn run() {
             resolve_reference,
             remove_source,
             list_sources,
+            save_project,
+            open_project,
             source_props,
             pipeline_dry_run_start,
             pipeline_apply_start,

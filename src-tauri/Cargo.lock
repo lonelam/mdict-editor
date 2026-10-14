@@ -2719,6 +2719,7 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "sha2",
  "swc_core",
  "symphonia",
  "tauri",

@@ -1,7 +1,8 @@
 // Global application state (Svelte 5 runes). Tab management, the jump stack
 // (Alt+←/→), selection for the pipeline, toasts and overlay versioning.
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
+import { Drafts } from "./drafts";
 import {
   idKey, parseIdKey,
   type Category, type CategoryStat, type ResourceId, type ResourceMeta,
@@ -22,7 +23,7 @@ export interface Toast {
 
 const PAGE = 100;
 
-class AppStore {
+export class AppStore {
   sources = $state<SourceInfo[]>([]);
   /** Per-source category stats, keyed by source id. */
   stats = $state<Record<number, CategoryStat[]>>({});
@@ -37,6 +38,16 @@ class AppStore {
   /** Explorer search prefix. */
   search = $state("");
   loading = $state(false);
+  projectPath = $state<string | null>(null);
+  projectBusy = $state(false);
+  changeVersion = $state(0);
+  savedVersion = $state(0);
+  sessionVersion = $state(0);
+  drafts = new Drafts();
+  /** The pending-insertion dialog supplies its current text before a save. */
+  saveInsertionDraft: (() => Promise<void>) | null = null;
+
+  get projectDirty(): boolean { return this.changeVersion !== this.savedVersion; }
 
   #toastId = 0;
 
@@ -61,6 +72,7 @@ class AppStore {
       const sources = await api.listSources();
       if (sources.length > 0) {
         this.sources = sources;
+        this.changeVersion += 1;
         for (const s of sources) void this.refreshStats(s.id);
       }
     } catch {
@@ -96,6 +108,7 @@ class AppStore {
         this.toast("error", e);
       }
       if (res.added.length > 0) {
+        this.changeVersion += 1;
         this.toast("ok", `已加载 ${res.added.length} 个文件`);
       }
       for (const s of res.added) void this.refreshStats(s.id);
@@ -111,6 +124,7 @@ class AppStore {
     try {
       const s = await api.createSource(kind, path);
       this.sources = [...this.sources, s];
+      this.changeVersion += 1;
       void this.refreshStats(s.id);
       this.toast("ok", `已创建并加载 ${s.name}`);
       return s;
@@ -123,7 +137,9 @@ class AppStore {
   /** Marks a resource deleted (export effect; revert to undo). */
   async markDeleted(id: ResourceId) {
     try {
+      await this.saveDrafts(idKey(id));
       await api.deleteResource(id);
+      this.closeTab(idKey(id));
       this.toast("ok", "已标记删除（导出生效；可还原）");
       this.bumpOverlay();
     } catch (e) {
@@ -135,6 +151,8 @@ class AppStore {
   async restoreResource(id: ResourceId) {
     try {
       await api.revertResource(id);
+      this.drafts.delete(idKey(id));
+      this.markDirty(idKey(id), false);
       this.toast("ok", "已还原");
       this.bumpOverlay();
     } catch (e) {
@@ -146,6 +164,10 @@ class AppStore {
   async removeSource(id: number) {
     try {
       await api.removeSource(id);
+      for (const key of this.drafts.keys()) {
+        const resource = parseIdKey(key);
+        if ((resource.t === "ext" ? resource.file : resource.source) === id) this.drafts.delete(key);
+      }
       this.sources = this.sources.filter((s) => s.id !== id);
       const closed = this.tabs.filter(
         (t) =>
@@ -154,6 +176,7 @@ class AppStore {
       );
       for (const t of closed) this.closeTab(t.key);
       delete this.stats[id];
+      this.bumpOverlay();
       this.toast("ok", "已移除（源文件未改动，可重新打开）");
     } catch (e) {
       this.toast("error", String(e));
@@ -161,8 +184,10 @@ class AppStore {
   }
 
   async refreshStats(sourceId: number) {
+    const session = this.sessionVersion;
     try {
       const stats = await api.resourceStats(sourceId);
+      if (session !== this.sessionVersion || !this.sources.some((s) => s.id === sourceId)) return;
       this.stats = { ...this.stats, [sourceId]: stats };
     } catch (e) {
       this.toast("error", String(e));
@@ -176,12 +201,15 @@ class AppStore {
   // ---- tabs & jumps ----
 
   async openResource(id: ResourceId, pushJump = true) {
+    if (this.projectBusy) return;
+    const session = this.sessionVersion;
     const key = idKey(id);
     let tab = this.tabs.find((t) => t.key === key);
     if (!tab) {
       try {
         const meta = await api.resourceMeta(id);
-        const newTab: Tab = { key, meta, dirty: false };
+        if (session !== this.sessionVersion || this.projectBusy) return;
+        const newTab: Tab = { key, meta, dirty: this.drafts.get(key) !== undefined };
         this.tabs = [...this.tabs, newTab];
         tab = newTab;
       } catch (e) {
@@ -214,16 +242,15 @@ class AppStore {
   }
 
   closeTab(key: string) {
+    const idx = this.tabs.findIndex((t) => t.key === key);
     this.tabs = this.tabs.filter((t) => t.key !== key);
     if (this.activeTabKey === key) {
-      const idx = this.tabs.findIndex((t) => t.key === key);
       this.activeTabKey =
         this.tabs[Math.max(0, idx - 1)]?.key ?? null;
     }
-    this.jump = {
-      stack: this.jump.stack.filter((k) => k !== key),
-      pos: Math.max(-1, this.jump.pos),
-    };
+    const stack = this.jump.stack.filter((k) => k !== key);
+    const pos = this.jump.stack.slice(0, this.jump.pos + 1).filter((k) => k !== key).length - 1;
+    this.jump = { stack, pos };
   }
 
   markDirty(key: string, dirty: boolean) {
@@ -233,7 +260,91 @@ class AppStore {
 
   bumpOverlay() {
     this.overlayVersion += 1;
+    this.changeVersion += 1;
     void this.refreshAllStats();
+  }
+
+  setDraft(key: string, text: string) {
+    this.drafts.set(key, text);
+    this.markDirty(key, true);
+    this.changeVersion += 1;
+  }
+
+  async saveDrafts(key?: string) {
+    try {
+      return await this.drafts.save(async (id, text) => {
+        await api.writeResource(parseIdKey(id), new TextEncoder().encode(text));
+        this.markDirty(id, this.drafts.get(id) !== text);
+        this.bumpOverlay();
+      }, key);
+    } finally {
+      for (const tab of this.tabs) this.markDirty(tab.key, this.drafts.get(tab.key) !== undefined);
+    }
+  }
+
+  /** Ctrl+S retains the active-editor workflow until a project is chosen. */
+  async saveCurrent() {
+    if (this.projectBusy || this.loading) return;
+    if (this.projectPath) return this.saveProject();
+    try {
+      await this.saveInsertionDraft?.();
+      const saved = await this.saveDrafts(this.activeTabKey ?? undefined);
+      if (saved.length) this.toast("ok", "已保存到改写层；保存项目可在下次打开时继续编辑");
+    } catch (e) { this.toast("error", `保存失败: ${e}`); }
+  }
+
+  async saveProject(saveAs = false) {
+    if (this.projectBusy || this.loading) return;
+    this.projectBusy = true;
+    try {
+      let path = saveAs ? null : this.projectPath;
+      if (!path) {
+        path = await save({
+          title: "保存编辑项目", defaultPath: this.projectPath ?? "词典校对.mdict-project",
+          filters: [{ name: "MDict 编辑项目", extensions: ["mdict-project"] }],
+        });
+        if (!path) return;
+        if (!path.toLowerCase().endsWith(".mdict-project")) path += ".mdict-project";
+      }
+      await this.saveInsertionDraft?.();
+      await this.saveDrafts();
+      const version = this.changeVersion;
+      await api.saveProject(path);
+      this.projectPath = path;
+      this.savedVersion = version;
+      this.toast("ok", "项目已保存，下次打开项目即可继续编辑");
+    } catch (e) { this.toast("error", `保存项目失败: ${e}`); }
+    finally { this.projectBusy = false; }
+  }
+
+  async openProject() {
+    if (this.projectBusy || this.loading) return;
+    this.projectBusy = true;
+    try {
+      const path = await open({
+        title: "打开编辑项目", multiple: false,
+        filters: [{ name: "MDict 编辑项目", extensions: ["mdict-project"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      if (this.projectDirty && !await ask("当前项目有未保存的修改。打开项目会替换当前会话，是否继续？", {
+        title: "打开项目", kind: "warning", okLabel: "丢弃并打开", cancelLabel: "继续编辑",
+      })) return;
+      const sources = await api.openProject(path);
+      this.tabs = [];
+      this.activeTabKey = null;
+      this.jump = { stack: [], pos: -1 };
+      this.selection = [];
+      this.search = "";
+      this.stats = {};
+      this.drafts.clear();
+      this.sources = sources;
+      this.projectPath = path;
+      this.sessionVersion += 1;
+      this.bumpOverlay();
+      this.savedVersion = this.changeVersion;
+      this.toast("ok", "项目已恢复，可以继续编辑或导出词典");
+    } catch (e) { this.toast("error", `打开项目失败: ${e}`); }
+    finally { this.projectBusy = false; }
   }
 
   /** Ctrl+Click navigation: resolve then open, with dead-link feedback. */
