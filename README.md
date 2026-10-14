@@ -45,7 +45,21 @@
 
 ## 下载
 
-打 `v*` 标签或手动触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建三端安装包并自动发布到 GitHub Releases：Windows（NSIS/MSI）、macOS（Apple Silicon DMG）、Linux（AppImage/deb）。
+打 `v*` 标签触发 [build workflow](https://github.com/lonelam/mdict-editor/actions/workflows/build.yml)，Actions 会构建并发布到 GitHub Releases：Windows（NSIS/MSI 安装包、portable ZIP）、macOS（Apple Silicon DMG）、Linux（AppImage/deb）。手动触发时可从该次运行的 Artifacts 下载产物，其中 Windows 便携版为 `mdict-editor-windows-portable`。
+
+Windows 便携包命名为 `mdict-editor-<版本>-windows-<架构>-portable.zip`，并提供 `.zip.sha256` 校验文件；当前 CI 构建 x64。
+解压后双击 `mdict-editor.exe` 即可使用，无须安装本应用。运行需要系统中的
+[Microsoft Edge WebView2 Runtime](https://v2.tauri.app/distribute/windows-installer/#webview2-installation-options)，
+压缩包内含使用说明与官方下载链接。浏览器缓存使用当前用户的应用数据目录；词典、项目与导出位置自行选择。
+
+在 Windows 本地只构建便携版：
+
+```bash
+npm run tauri build -- --no-bundle
+npm run package:portable
+```
+
+产物位于 `src-tauri/target/portable/`。完成正常的 `npm run tauri build` 后也可以直接执行第二条命令。
 
 ## 与 AALookup 的关系（同构）
 
