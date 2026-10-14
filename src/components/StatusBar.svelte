@@ -12,11 +12,11 @@
     {tab ? `${tab.meta.sourceName} · ${tab.meta.key}` : "就绪"}
   </span>
   <span class="cell" class:edited={tab?.meta.edited}>
-    {tab?.meta.edited ? "已编辑" : "未修改"}
+    {tab?.dirty ? "未保存" : tab?.meta.edited ? "已保存到会话" : "未修改"}
   </span>
   <span class="cell grow"></span>
   <span class="cell dim" title={store.projectPath ?? "保存项目可在下次打开时继续编辑"}>
-    {store.projectBusy ? "项目读写中…" : store.projectPath
+    {store.saving ? "保存中…" : store.projectBusy ? "项目读写中…" : store.projectPath
       ? `${store.projectPath.split(/[\\/]/).pop()}${store.projectDirty ? " · 未保存" : " · 已保存"}`
       : store.sources.length > 0 ? "项目未保存到磁盘" : ""}
   </span>

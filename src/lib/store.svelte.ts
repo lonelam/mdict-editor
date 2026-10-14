@@ -44,6 +44,11 @@ export class AppStore {
   savedVersion = $state(0);
   sessionVersion = $state(0);
   drafts = new Drafts();
+  autoSave = $state(true);
+  saving = $state(false);
+  codeSelection = $state<{ key: string; from: number; to: number; text: string } | null>(null);
+  #autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  #writes: Promise<unknown> = Promise.resolve();
   /** The pending-insertion dialog supplies its current text before a save. */
   saveInsertionDraft: (() => Promise<void>) | null = null;
 
@@ -116,6 +121,7 @@ export class AppStore {
       this.toast("error", String(e));
     } finally {
       this.loading = false;
+      this.scheduleAutoSave();
     }
   }
 
@@ -125,6 +131,7 @@ export class AppStore {
       const s = await api.createSource(kind, path);
       this.sources = [...this.sources, s];
       this.changeVersion += 1;
+      this.scheduleAutoSave();
       void this.refreshStats(s.id);
       this.toast("ok", `已创建并加载 ${s.name}`);
       return s;
@@ -262,40 +269,82 @@ export class AppStore {
     this.overlayVersion += 1;
     this.changeVersion += 1;
     void this.refreshAllStats();
+    void this.refreshTabs();
+    this.scheduleAutoSave();
   }
 
   setDraft(key: string, text: string) {
     this.drafts.set(key, text);
     this.markDirty(key, true);
     this.changeVersion += 1;
+    this.scheduleAutoSave();
+  }
+
+  async refreshTabs() {
+    const version = this.overlayVersion, session = this.sessionVersion;
+    await Promise.all(this.tabs.map(async (tab) => {
+      try {
+        const meta = await api.resourceMeta(tab.meta.id);
+        if (version !== this.overlayVersion || session !== this.sessionVersion || !this.tabs.includes(tab)) return;
+        tab.meta.edited = meta.edited;
+        tab.meta.deleted = meta.deleted;
+        tab.meta.sizeCurrent = meta.sizeCurrent;
+      } catch { /* A removed source may finish refreshing after its tabs close. */ }
+    }));
+  }
+
+  scheduleAutoSave() {
+    clearTimeout(this.#autoSaveTimer);
+    if (!this.autoSave) return;
+    this.#autoSaveTimer = setTimeout(() => { void this.saveCurrent(true); }, 800);
+  }
+
+  setAutoSave(enabled: boolean) {
+    this.autoSave = enabled;
+    this.scheduleAutoSave();
   }
 
   async saveDrafts(key?: string) {
+    const operation = this.#writes.then(async () => {
+      try {
+        return await this.drafts.save(async (id, text) => {
+          await api.writeResource(parseIdKey(id), new TextEncoder().encode(text));
+          this.markDirty(id, this.drafts.get(id) !== text);
+          this.bumpOverlay();
+        }, key);
+      } finally {
+        for (const tab of this.tabs) this.markDirty(tab.key, this.drafts.get(tab.key) !== undefined);
+      }
+    });
+    this.#writes = operation.catch(() => {});
+    return operation;
+  }
+
+  /** Ctrl+S and autosave flush all tabs, including closed-tab drafts. */
+  async saveCurrent(quiet = false) {
+    clearTimeout(this.#autoSaveTimer);
+    if (this.projectBusy || this.loading || this.saving) return;
+    if (this.projectPath) return this.saveProject(false, quiet);
+    this.saving = true;
+    let failed = false;
     try {
-      return await this.drafts.save(async (id, text) => {
-        await api.writeResource(parseIdKey(id), new TextEncoder().encode(text));
-        this.markDirty(id, this.drafts.get(id) !== text);
-        this.bumpOverlay();
-      }, key);
-    } finally {
-      for (const tab of this.tabs) this.markDirty(tab.key, this.drafts.get(tab.key) !== undefined);
+      await this.saveInsertionDraft?.();
+      await this.saveDrafts();
+      if (!quiet) this.toast("ok", "全部词条已保存到本次会话，可导出；保存项目可在下次继续编辑");
+    } catch (e) { failed = true; this.toast("error", `保存失败: ${e}`); }
+    finally {
+      this.saving = false;
+      clearTimeout(this.#autoSaveTimer);
+      if (!failed && this.drafts.keys().length) this.scheduleAutoSave();
     }
   }
 
-  /** Ctrl+S retains the active-editor workflow until a project is chosen. */
-  async saveCurrent() {
-    if (this.projectBusy || this.loading) return;
-    if (this.projectPath) return this.saveProject();
-    try {
-      await this.saveInsertionDraft?.();
-      const saved = await this.saveDrafts(this.activeTabKey ?? undefined);
-      if (saved.length) this.toast("ok", "已保存到改写层；保存项目可在下次打开时继续编辑");
-    } catch (e) { this.toast("error", `保存失败: ${e}`); }
-  }
-
-  async saveProject(saveAs = false) {
-    if (this.projectBusy || this.loading) return;
-    this.projectBusy = true;
+  async saveProject(saveAs = false, quiet = false) {
+    clearTimeout(this.#autoSaveTimer);
+    if (this.projectBusy || this.loading || this.saving) return;
+    this.projectBusy = !quiet;
+    this.saving = true;
+    let failed = false;
     try {
       let path = saveAs ? null : this.projectPath;
       if (!path) {
@@ -309,16 +358,23 @@ export class AppStore {
       await this.saveInsertionDraft?.();
       await this.saveDrafts();
       const version = this.changeVersion;
+      const hasNewDrafts = this.drafts.keys().length > 0;
       await api.saveProject(path);
       this.projectPath = path;
-      this.savedVersion = version;
-      this.toast("ok", "项目已保存，下次打开项目即可继续编辑");
-    } catch (e) { this.toast("error", `保存项目失败: ${e}`); }
-    finally { this.projectBusy = false; }
+      if (!hasNewDrafts) this.savedVersion = version;
+      if (!quiet) this.toast("ok", "项目已保存，下次打开项目即可继续编辑");
+    } catch (e) { failed = true; this.toast("error", `保存项目失败: ${e}`); }
+    finally {
+      this.projectBusy = false;
+      this.saving = false;
+      clearTimeout(this.#autoSaveTimer);
+      if (!failed && this.drafts.keys().length) this.scheduleAutoSave();
+    }
   }
 
   async openProject() {
-    if (this.projectBusy || this.loading) return;
+    if (this.projectBusy || this.loading || this.saving) return;
+    clearTimeout(this.#autoSaveTimer);
     this.projectBusy = true;
     try {
       const path = await open({
@@ -337,6 +393,7 @@ export class AppStore {
       this.search = "";
       this.stats = {};
       this.drafts.clear();
+      this.codeSelection = null;
       this.sources = sources;
       this.projectPath = path;
       this.sessionVersion += 1;
@@ -344,7 +401,15 @@ export class AppStore {
       this.savedVersion = this.changeVersion;
       this.toast("ok", "项目已恢复，可以继续编辑或导出词典");
     } catch (e) { this.toast("error", `打开项目失败: ${e}`); }
-    finally { this.projectBusy = false; }
+    finally {
+      this.projectBusy = false;
+      if (this.drafts.keys().length) this.scheduleAutoSave();
+    }
+  }
+
+  async locateCode(id: ResourceId, from: number, to: number, text: string) {
+    await this.openResource(id);
+    this.codeSelection = { key: idKey(id), from, to, text };
   }
 
   /** Ctrl+Click navigation: resolve then open, with dead-link feedback. */

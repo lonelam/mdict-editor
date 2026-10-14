@@ -27,7 +27,9 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2",
-    "codemirror": "^6.0.2"
+    "codemirror": "^6.0.2",
+    "entities": "^8.1.0",
+    "parse5": "^8.0.1"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.10",

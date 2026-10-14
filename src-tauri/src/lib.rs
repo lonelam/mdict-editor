@@ -554,16 +554,12 @@ fn delete_resource(id: ResourceId, state: tauri::State<AppState>) -> Result<(), 
 /// load it globally. The preview reproduces that by injecting `<link>` tags
 /// for every loaded CSS (external files first, then MDD css resources) into
 /// MDX entry HTML, skipping stylesheets the entry already references.
-fn inject_preview_css(
+fn preview_css_paths(
     pool: &SourcePool,
     overlay: &Overlay,
     registry: &Registry,
-    html: &[u8],
-) -> Vec<u8> {
-    let text = match std::str::from_utf8(html) {
-        Ok(t) => t,
-        Err(_) => return html.to_vec(),
-    };
+    text: &str,
+) -> Vec<String> {
     let mut links: Vec<String> = Vec::new();
     for (idx, entry) in pool.sources.iter().enumerate() {
         if entry.tombstone {
@@ -577,7 +573,7 @@ fn inject_preview_css(
                     .is_some_and(|e| e.eq_ignore_ascii_case("css"));
                 if is_css {
                     let id = ResourceId::Ext { file: idx as u32 };
-                    if overlay.get(&id).is_some_and(|r| !r.deleted) {
+                    if overlay.get(&id).is_none_or(|r| !r.deleted) {
                         if let Ok(name) = pool.key_of(&id) {
                             links.push(name);
                         }
@@ -586,14 +582,14 @@ fn inject_preview_css(
             }
             crate::state::Source::Mdd(file) => {
                 // Original-case hrefs: one representative key per css name.
-                if registry.indices.get(idx).is_some_and(|o| o.is_some()) {
-                    for key in file.keys().flatten() {
-                        if key.key().to_lowercase().ends_with(".css") {
+                if let Some(Some(index)) = registry.indices.get(idx) {
+                    for (_, ordinal) in index.rows.iter().filter(|(key, _)| key.ends_with(".css")) {
+                        if let Ok(Some(key)) = file.key_at(mdictlib::KeyOrdinal::new(*ordinal)) {
                             let id = ResourceId::Mdd {
                                 source: idx as u32,
                                 ordinal: key.ordinal().get(),
                             };
-                            if overlay.get(&id).is_some_and(|r| !r.deleted) {
+                            if overlay.get(&id).is_none_or(|r| !r.deleted) {
                                 links.push(key.key().to_string());
                             }
                         }
@@ -605,13 +601,18 @@ fn inject_preview_css(
     }
     links.sort();
     links.dedup();
-    let tags: Vec<String> = links
+    links
         .into_iter()
         .filter(|name| {
             let encoded = name.replace(' ', "%20");
             !text.contains(&encoded) && !text.contains(name.as_str())
         })
-        .map(|name| {
+        .collect()
+}
+
+fn inject_preview_css(pool: &SourcePool, overlay: &Overlay, registry: &Registry, html: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(html) else { return html.to_vec(); };
+    let tags: Vec<String> = preview_css_paths(pool, overlay, registry, text).into_iter().map(|name| {
             let encoded = name.replace(' ', "%20");
             format!("<link rel=\"stylesheet\" href=\"{}\">", encoded)
         })
@@ -637,6 +638,36 @@ fn inject_preview_css(
     patched.into_bytes()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewContent {
+    pub target: ResourceId,
+    pub key: String,
+    pub text: String,
+    pub styles: Vec<String>,
+    pub redirects: Vec<String>,
+}
+
+/// Preview a draft without committing it. Return the actual entry after
+/// redirect resolution so the frontend can map selections to that source.
+pub fn prepare_preview(state: &AppState, id: ResourceId, text: Option<String>) -> Result<PreviewContent, String> {
+    let pool = state.pool.read().map_err(|e| e.to_string())?;
+    let overlay = state.overlay.read().map_err(|e| e.to_string())?;
+    let mut registry = state.registry.write().map_err(|e| e.to_string())?;
+    registry::ensure_built(&pool, &mut registry)?;
+    let bytes = match text { Some(t) => t.into_bytes(), None => state::current_bytes(&pool, &overlay, &id)? };
+    let (target, bytes, redirects) = follow_preview_redirects(&pool, &overlay, &id, bytes);
+    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let styles = preview_css_paths(&pool, &overlay, &registry, &text);
+    Ok(PreviewContent { key: pool.key_of(&target)?, target, text, styles, redirects })
+}
+
+#[tauri::command]
+async fn preview_content(id: ResourceId, text: Option<String>, app: AppHandle) -> Result<PreviewContent, String> {
+    tauri::async_runtime::spawn_blocking(move || prepare_preview(&app.state::<AppState>(), id, text))
+        .await.map_err(|e| e.to_string())?
+}
+
 /// Final HTML for the MDX entry preview: follows `@@@LINK=word` redirect
 /// chains the way reader apps do (each hop overlay-aware), injects companion
 /// CSS, and when a redirect was actually followed prepends a small badge
@@ -648,8 +679,19 @@ fn preview_entry_html(
     overlay: &Overlay,
     registry: &Registry,
     ctx: &ResourceId,
-    mut bytes: Vec<u8>,
+    bytes: Vec<u8>,
 ) -> Vec<u8> {
+    let (_, bytes, hops) = follow_preview_redirects(pool, overlay, ctx, bytes);
+    let bytes = inject_preview_css(pool, overlay, registry, &bytes);
+    if hops.is_empty() { return bytes; }
+    let start = pool.key_of(ctx).unwrap_or_default();
+    let path = std::iter::once(start).chain(hops).collect::<Vec<_>>().join(" → ");
+    let Ok(text) = std::str::from_utf8(&bytes) else { return bytes; };
+    let badge = format!("<div style=\"position:absolute;top:6px;right:8px;z-index:2147483647;pointer-events:none;font:11px/1.6 sans-serif;color:#666;background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.3);border-radius:4px;padding:1px 8px;\">@@@LINK 跳转: {path}</div>");
+    inject_after_body_open(text, &badge).into_bytes()
+}
+
+fn follow_preview_redirects(pool: &SourcePool, overlay: &Overlay, ctx: &ResourceId, mut bytes: Vec<u8>) -> (ResourceId, Vec<u8>, Vec<String>) {
     const MAX_HOPS: usize = 16;
     let mut hops: Vec<String> = Vec::new();
     let mut visited: Vec<ResourceId> = Vec::new();
@@ -658,6 +700,7 @@ fn preview_entry_html(
         if visited.len() >= MAX_HOPS || visited.contains(&current) {
             break;
         }
+        if !matches!(ctx, ResourceId::Mdx { .. }) { break; }
         let Some(word) = resolver::link_redirect_target(&bytes) else {
             break;
         };
@@ -675,25 +718,7 @@ fn preview_entry_html(
         hops.push(word);
         current = next;
     }
-    let bytes = inject_preview_css(pool, overlay, registry, &bytes);
-    if hops.is_empty() {
-        return bytes;
-    }
-    let start = pool.key_of(ctx).unwrap_or_default();
-    let path = std::iter::once(start)
-        .chain(hops)
-        .collect::<Vec<_>>()
-        .join(" → ");
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return bytes;
-    };
-    let badge = format!(
-        "<div style=\"position:absolute;top:6px;right:8px;z-index:2147483647;\
-pointer-events:none;font:11px/1.6 sans-serif;color:#666;\
-background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.3);\
-border-radius:4px;padding:1px 8px;\">@@@LINK 跳转: {path}</div>"
-    );
-    inject_after_body_open(&text, &badge).into_bytes()
+    (current, bytes, hops)
 }
 
 /// Inserts `fragment` right after the opening `<body>` tag (or prepends it
@@ -742,6 +767,7 @@ pub fn handle_mdres_request(state: &AppState, uri_path: &str) -> tauri::http::Re
             .status(200)
             .header("Content-Type", mime)
             .header("Cache-Control", "no-store")
+            .header("Access-Control-Allow-Origin", "null")
             .body(bytes)
             .unwrap()
     };
@@ -851,6 +877,7 @@ fn serve_resolved(state: &AppState, rel: &str, ctx: Option<&ResourceId>) -> taur
             .status(200)
             .header("Content-Type", mime)
             .header("Cache-Control", "no-store")
+            .header("Access-Control-Allow-Origin", "null")
             .body(bytes)
             .unwrap();
     }
@@ -874,6 +901,7 @@ fn serve_resolved(state: &AppState, rel: &str, ctx: Option<&ResourceId>) -> taur
                 .status(200)
                 .header("Content-Type", crate::category::Category::mime_for(&key))
                 .header("Cache-Control", "no-store")
+                .header("Access-Control-Allow-Origin", "null")
                 .body(bytes)
                 .unwrap()
         }
@@ -1405,6 +1433,7 @@ pub fn run() {
             list_resources,
             resource_meta,
             read_resource,
+            preview_content,
             write_resource,
             undo_resource,
             revert_resource,

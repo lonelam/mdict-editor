@@ -205,7 +205,7 @@
   let editInsSaving = $state(false);
   let editInsOriginal = "";
 
-  function insertionChanged() { store.changeVersion += 1; }
+  function insertionChanged() { store.changeVersion += 1; store.scheduleAutoSave(); }
 
   $effect(() => {
     const editing = editIns;

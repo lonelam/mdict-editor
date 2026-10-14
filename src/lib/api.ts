@@ -208,6 +208,16 @@ export async function readResource(id: ResourceId): Promise<ResourceContent> {
   return invoke("read_resource", { id });
 }
 
+export interface PreviewContent {
+  target: ResourceId;
+  key: string;
+  text: string;
+  styles: string[];
+  redirects: string[];
+}
+export const previewContent = (id: ResourceId, text: string) =>
+  invoke<PreviewContent>("preview_content", { id, text });
+
 export async function writeResource(id: ResourceId, bytes: Uint8Array): Promise<RevisionInfo> {
   return invoke("write_resource", { id, bytes: Array.from(bytes) });
 }

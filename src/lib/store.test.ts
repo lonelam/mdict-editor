@@ -43,6 +43,74 @@ describe("project workflow", () => {
     expect(api.saveProject).toHaveBeenCalledTimes(2);
   });
 
+  it("Ctrl+S saves multiple entries in one session without a project dialog", async () => {
+    const store = new AppStore();
+    store.setAutoSave(false);
+    const second: ResourceId = { t: "mdx", source: 0, ordinal: 4 };
+    store.setDraft(idKey(id), "first, edited in multiple places");
+    store.setDraft(idKey(second), "second");
+    store.activeTabKey = idKey(second);
+    await store.saveCurrent();
+    expect(api.writeResource).toHaveBeenCalledTimes(2);
+    expect(store.drafts.keys()).toEqual([]);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("autosave coalesces typing and saves all drafts after the pause", async () => {
+    const store = new AppStore();
+    store.setDraft(idKey(id), "old");
+    await vi.advanceTimersByTimeAsync(400);
+    store.setDraft(idKey(id), "new");
+    store.setDraft(idKey({ t: "mdx", source: 0, ordinal: 4 }), "other");
+    await vi.advanceTimersByTimeAsync(799);
+    expect(api.writeResource).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.writeResource).toHaveBeenCalledTimes(2);
+    expect(api.writeResource).toHaveBeenCalledWith(id, new TextEncoder().encode("new"));
+    expect(store.toasts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(api.writeResource).toHaveBeenCalledTimes(2);
+  });
+
+  it("autosaves a chosen project without disabling the editor and keeps newer drafts dirty", async () => {
+    const store = new AppStore();
+    store.projectPath = "F:/test.mdict-project";
+    store.setDraft(idKey(id), "old");
+    vi.mocked(api.writeResource).mockImplementationOnce(async () => {
+      expect(store.projectBusy).toBe(false);
+      store.setDraft(idKey(id), "newer");
+      return { historyLen: 1, sizeOriginal: 0, sizeCurrent: 3 };
+    });
+    await store.saveCurrent(true);
+    expect(api.saveProject).toHaveBeenCalledOnce();
+    expect(store.drafts.get(idKey(id))).toBe("newer");
+    expect(store.projectDirty).toBe(true);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(store.projectDirty).toBe(false);
+    expect(store.drafts.keys()).toEqual([]);
+  });
+
+  it("disabled or failed autosave retains drafts without repeated error loops", async () => {
+    const store = new AppStore();
+    store.setAutoSave(false);
+    store.setDraft(idKey(id), "text");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.writeResource).not.toHaveBeenCalled();
+    vi.mocked(api.writeResource).mockRejectedValue(new Error("failed"));
+    store.setAutoSave(true);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(api.writeResource).toHaveBeenCalledOnce();
+    expect(store.drafts.get(idKey(id))).toBe("text");
+    expect(store.toasts).toHaveLength(1);
+  });
+
+  it("serializes overlapping draft writes and does not duplicate undo revisions", async () => {
+    const store = new AppStore();
+    store.setDraft(idKey(id), "text");
+    await Promise.all([store.saveDrafts(), store.saveDrafts()]);
+    expect(api.writeResource).toHaveBeenCalledOnce();
+  });
+
   it("cancelled or failed saves keep the project dirty and release busy state", async () => {
     const store = new AppStore();
     store.setDraft(idKey(id), "text");
