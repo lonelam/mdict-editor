@@ -45,6 +45,8 @@
     running = true;
     progress = { done: 0, total: 0, item: "启动中…" };
     try {
+      await store.saveInsertionDraft?.();
+      await store.saveDrafts();
       report = await api.runJob<ExportReport>(
         () =>
           api.exportStart({

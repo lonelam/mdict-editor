@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as api from "../lib/api";
   import { store } from "../lib/store.svelte";
-  import type { ResourceContent } from "../lib/types";
+  import { idKey, type ResourceContent } from "../lib/types";
 
   const tab = $derived(store.activeTab);
 
@@ -22,6 +22,7 @@
 
   async function undo() {
     if (!tab) return;
+    await store.saveDrafts(idKey(tab.meta.id));
     const ok = await api.undoResource(tab.meta.id);
     store.toast(ok ? "ok" : "info", ok ? "已回退一个修订" : "没有可回退的修订");
     store.bumpOverlay();
@@ -29,16 +30,12 @@
 
   async function revert() {
     if (!tab) return;
-    const ok = await api.revertResource(tab.meta.id);
-    store.toast(ok ? "ok" : "info", ok ? "已还原到原始内容" : "该资源没有编辑");
-    store.bumpOverlay();
+    await store.restoreResource(tab.meta.id);
   }
 
   async function markDelete() {
     if (!tab) return;
-    await api.deleteResource(tab.meta.id);
-    store.toast("ok", "已标记删除（导出时生效，可还原）");
-    store.bumpOverlay();
+    await store.markDeleted(tab.meta.id);
   }
 
   function fmtSize(n: number): string {

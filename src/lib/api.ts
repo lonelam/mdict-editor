@@ -30,6 +30,9 @@ export async function listSources(): Promise<SourceInfo[]> {
   return invoke("list_sources");
 }
 
+export const saveProject = (path: string) => invoke<void>("save_project", { path });
+export const openProject = (path: string) => invoke<SourceInfo[]>("open_project", { path });
+
 export interface SourceProps {
   id: number;
   kind: string;
@@ -204,6 +207,16 @@ export async function resourceMeta(id: ResourceId): Promise<ResourceMeta> {
 export async function readResource(id: ResourceId): Promise<ResourceContent> {
   return invoke("read_resource", { id });
 }
+
+export interface PreviewContent {
+  target: ResourceId;
+  key: string;
+  text: string;
+  styles: string[];
+  redirects: string[];
+}
+export const previewContent = (id: ResourceId, text: string) =>
+  invoke<PreviewContent>("preview_content", { id, text });
 
 export async function writeResource(id: ResourceId, bytes: Uint8Array): Promise<RevisionInfo> {
   return invoke("write_resource", { id, bytes: Array.from(bytes) });

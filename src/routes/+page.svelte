@@ -1,5 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { isTauri } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import { store } from "../lib/store.svelte";
   import ExplorerPane from "../components/ExplorerPane.svelte";
   import TabBar from "../components/TabBar.svelte";
@@ -14,10 +17,11 @@
   let showExport = $state(false);
 
   function onKeydown(e: KeyboardEvent) {
-    // Ctrl+S → save active editor (editors listen for the event too)
+    // Ctrl+S → save editor / current project; Ctrl+Shift+S → save project as.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      window.dispatchEvent(new CustomEvent("app-save"));
+      if (e.shiftKey) void store.saveProject(true);
+      else void store.saveCurrent();
       return;
     }
     // Ctrl+W → close tab
@@ -42,6 +46,25 @@
   onMount(() => {
     (window as unknown as { __store: typeof store }).__store = store;
     void store.init();
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let closing = false;
+    const appWindow = getCurrentWindow();
+    void appWindow.onCloseRequested(async (event) => {
+      if (!store.projectDirty && !store.projectBusy && !store.saving) return;
+      event.preventDefault();
+      if (closing || store.projectBusy || store.saving) return;
+      closing = true;
+      try {
+        if (await ask("修改尚未保存到项目文件。请先点击“保存项目”以便下次继续编辑。仍要丢弃修改并退出吗？", {
+          title: "未保存的项目", kind: "warning", okLabel: "丢弃并退出", cancelLabel: "继续编辑",
+        })) await appWindow.destroy();
+      } catch (e) { store.toast("error", String(e)); }
+      finally { closing = false; }
+    }).then((off) => { if (disposed) off(); else unlisten = off; })
+      .catch((e) => store.toast("error", `关闭保护初始化失败: ${e}`));
+    return () => { disposed = true; unlisten?.(); };
   });
 </script>
 
@@ -54,20 +77,25 @@
 <div class="shell">
   <header class="toolbar">
     <span class="logo">MDict Editor</span>
-    <button onclick={() => store.openFiles()}>打开 / 追加文件</button>
+    <button onclick={() => store.openFiles()} disabled={store.projectBusy || store.saving || store.loading}>打开 / 追加文件</button>
+    <button onclick={() => store.openProject()} disabled={store.projectBusy || store.saving || store.loading}>打开项目</button>
+    <button onclick={() => store.saveProject()} disabled={store.projectBusy || store.saving || store.loading || store.sources.length === 0}>保存项目</button>
     <span class="sep"></span>
     <button
       onclick={() => (showPipeline = true)}
-      disabled={store.sources.length === 0}>处理管线</button>
+      disabled={store.projectBusy || store.sources.length === 0}>处理管线</button>
     <button
       onclick={() => (showExport = true)}
-      disabled={store.sources.length === 0}>导出</button>
+      disabled={store.projectBusy || store.sources.length === 0}>导出</button>
     <span class="grow"></span>
-    <span class="hint">Ctrl+S 保存 · Ctrl+点击 跳转引用 · Alt+←/→ 跳转历史</span>
+    <label class="hint" title={store.projectPath ? "输入停顿后保存全部修改到当前项目" : "输入停顿后保存到本次会话；跨天编辑请保存项目"}>
+      <input type="checkbox" checked={store.autoSave} onchange={(e) => store.setAutoSave(e.currentTarget.checked)} /> 自动保存
+    </label>
+    <span class="hint">Ctrl+S 保存 · Ctrl+Shift+S 项目另存 · Ctrl+点击 跳转</span>
   </header>
 
-  <div class="main">
-    <ExplorerPane />
+  <div class="main" inert={store.projectBusy}>
+    {#key store.sessionVersion}<ExplorerPane />{/key}
     <div class="center">
       <TabBar />
       <EditorHost />

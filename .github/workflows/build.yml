@@ -2,7 +2,7 @@ name: build
 
 # 3-platform client builds (Windows / macOS Apple Silicon / macOS Intel / Linux).
 # - push a `v*` tag → builds all platforms and publishes a GitHub Release
-#   with the installers (NSIS/MSI, DMG x2, AppImage/deb)
+#   with the installers (NSIS/MSI, DMG x2, AppImage/deb, Windows portable ZIP)
 # - manual dispatch → artifacts on the workflow run
 #
 # mdictlib comes from crates.io; no sibling checkout is needed.
@@ -64,6 +64,20 @@ jobs:
       - name: Build app
         run: npm run tauri build -- ${{ matrix.args }}
 
+      - name: Package Windows portable
+        if: runner.os == 'Windows'
+        run: npm run package:portable
+
+      - name: Upload Windows portable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdict-editor-windows-portable
+          if-no-files-found: error
+          path: |
+            src-tauri/target/portable/*.zip
+            src-tauri/target/portable/*.zip.sha256
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
@@ -83,7 +97,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Collect installers
+      - name: Collect release files
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true

@@ -77,7 +77,9 @@
     try {
       const oldKey = renameOf.key;
       const newKey = renameText.trim();
+      await store.saveDrafts(idKey(renameOf.id));
       await api.renameEntry(renameOf.id, newKey);
+      store.closeTab(idKey(renameOf.id));
       store.toast("ok", `已重命名 ${oldKey} → ${newKey}（导出时生效）`);
       renameOf = null;
       store.bumpOverlay();
@@ -119,6 +121,7 @@
       insKey = "";
       insHtml = "<p></p>";
       showInsertForm = false;
+      store.bumpOverlay();
       await refreshInsertions();
     } catch (e) {
       store.toast("error", String(e));
@@ -155,6 +158,7 @@
         insPrefix.trim() || null
       );
       if (added > 0) store.toast("ok", `已加入 ${added} 个资源（导出时写入）`);
+      if (added > 0) store.bumpOverlay();
       for (const e of errors) store.toast("error", e);
       await refreshInsertions();
     } catch (e) {
@@ -186,6 +190,7 @@
   async function dropInsertion(idx: number) {
     try {
       await api.removeInsertion(idx);
+      store.bumpOverlay();
       await refreshInsertions();
     } catch (e) {
       store.toast("error", String(e));
@@ -198,6 +203,23 @@
   let editIns = $state<{ index: number; name: string; kind: string } | null>(null);
   let editInsText = $state("");
   let editInsSaving = $state(false);
+  let editInsOriginal = "";
+
+  function insertionChanged() { store.changeVersion += 1; store.scheduleAutoSave(); }
+
+  $effect(() => {
+    const editing = editIns;
+    const text = editInsText;
+    store.saveInsertionDraft = editing ? async () => {
+      if (text !== editInsOriginal) {
+        await api.updateInsertion(editing.index, text);
+        editInsOriginal = text;
+        store.bumpOverlay();
+        await refreshInsertions();
+      }
+    } : null;
+    return () => { store.saveInsertionDraft = null; };
+  });
 
   async function openInsEditor(ins: InsertionInfo) {
     try {
@@ -208,6 +230,7 @@
       }
       editIns = { index: ins.index, name: ins.name, kind: ins.kind };
       editInsText = content.text;
+      editInsOriginal = content.text;
     } catch (e) {
       store.toast("error", String(e));
     }
@@ -218,6 +241,7 @@
     editInsSaving = true;
     try {
       await api.updateInsertion(editIns.index, editInsText);
+      store.bumpOverlay();
       store.toast("ok", `已保存 “${editIns.name}”`);
       editIns = null;
       await refreshInsertions();
@@ -523,7 +547,7 @@
         <h3>{editIns.kind === "entry" ? "编辑词条插入" : "编辑资源插入"} · {editIns.name}</h3>
         <button class="x" onclick={() => (editIns = null)}>×</button>
       </header>
-      <textarea bind:value={editInsText} rows="14" spellcheck="false"></textarea>
+      <textarea bind:value={editInsText} oninput={insertionChanged} rows="14" spellcheck="false"></textarea>
       <footer>
         <span class="hint">待插入项，导出时写入词典文件</span>
         <button class="ghost" onclick={() => (editIns = null)}>取消</button>

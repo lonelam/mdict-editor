@@ -456,3 +456,36 @@ fn mdres_redirect_serves_edited_target() {
     let body = String::from_utf8_lossy(resp.body()).into_owned();
     assert!(body.contains("edited beta"), "{body}");
 }
+
+#[test]
+fn draft_preview_returns_actual_redirect_source_without_saving() {
+    let (state, _dir) = redirect_state();
+    let alpha = ResourceId::Mdx { source: 0, ordinal: 0 };
+    let beta = ResourceId::Mdx { source: 0, ordinal: 1 };
+    let preview = mdict_editor_lib::prepare_preview(&state, alpha.clone(), None).unwrap();
+    assert_eq!(preview.target, beta);
+    assert_eq!(preview.text, "<p>beta body</p>");
+    assert_eq!(preview.redirects, vec!["beta"]);
+    let draft = mdict_editor_lib::prepare_preview(&state, alpha.clone(), Some("<p>draft text</p>".into())).unwrap();
+    assert_eq!(draft.target, alpha.clone());
+    assert_eq!(draft.text, "<p>draft text</p>");
+    assert!(state.overlay.read().unwrap().revisions.is_empty());
+    assert_eq!(state.pool.read().unwrap().read_original(&alpha).unwrap(), b"@@@LINK=beta");
+}
+
+#[test]
+fn preview_includes_unedited_css_and_excludes_deleted_css() {
+    let env = setup();
+    let state = &env.state;
+    let entry = ResourceId::Mdx { source: 0, ordinal: 2 };
+    let preview = mdict_editor_lib::prepare_preview(state, entry.clone(), Some("<p>draft</p>".into())).unwrap();
+    assert!(preview.styles.iter().any(|p| p.ends_with("style.css")));
+    assert!(preview.styles.iter().any(|p| p == "style-ext.css"));
+    let css = ResourceId::Ext { file: 2 };
+    let original = state.pool.read().unwrap().read_original(&css).unwrap();
+    state.overlay.write().unwrap().delete(css, original);
+    let preview = mdict_editor_lib::prepare_preview(state, entry, None).unwrap();
+    assert!(!preview.styles.iter().any(|p| p == "style-ext.css"));
+    let response = mdict_editor_lib::handle_mdres_request(state, "/img/logo.png");
+    assert_eq!(response.headers().get("Access-Control-Allow-Origin").unwrap(), "null");
+}
